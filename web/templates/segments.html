@@ -1,0 +1,56 @@
+{{define "segments.html"}}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Segments</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css" />
+  <script defer src="/static/app.js"></script>
+</head>
+<body class="app">
+  {{template "topbar" .}}
+  <div class="container">
+    <h1 class="title">Segments</h1>
+    
+    <div class="control">
+      <a class="link" href="/">&larr; Back to activities</a>
+    </div>
+
+    <div class="list">
+      {{range .Segments}}
+      <div class="item" data-segment-id="{{.ID}}">
+        <div class="item-row">
+          <div class="left">
+            <div><a class="link" href="/segment/{{.ID}}">{{.Name}}</a></div>
+            {{if .Description}}
+            <div class="meta">{{.Description}}</div>
+            {{end}}
+            <div class="meta">Created: {{.CreatedAt}}</div>
+          </div>
+          <div class="right">
+            <button class="delete-segment-btn" data-segment-id="{{.ID}}" data-segment-name="{{.Name}}">Delete</button>
+          </div>
+        </div>
+      </div>
+      {{else}}
+      <div>No segments found. Create segments from activity pages.</div>
+      {{end}}
+    </div>
+  </div>
+
+  <!-- Delete confirmation modal -->
+  <div id="delete-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:var(--panel); padding:24px; border-radius:8px; max-width:400px; width:90%;">
+      <h3 style="margin-top:0;">Delete Segment?</h3>
+      <p>Are you sure you want to delete "<span id="delete-segment-name"></span>"? This action cannot be undone.</p>
+      <div style="display:flex; gap:12px; justify-content:flex-end; margin-top:20px;">
+        <button id="delete-cancel-btn" style="padding:8px 16px;">Cancel</button>
+        <button id="delete-confirm-btn" style="padding:8px 16px; background:#e74c3c; color:white; border:none; border-radius:4px; cursor:pointer;">Delete</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+{{end}}
+

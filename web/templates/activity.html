@@ -1,0 +1,50 @@
+{{define "activity.html"}}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>{{.Activity.Name}}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src='https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js'></script>
+  <link href='https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css' rel='stylesheet' />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <link rel="stylesheet" href="/static/app.css" />
+  <script>window.__MAPBOX_TOKEN__='{{.MapboxToken}}';</script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body class="app">
+  {{template "topbar" .}}
+  <div class="wrap">
+    <div style="flex: 1; display: flex; flex-direction: column; height: calc(100vh - 60px); min-height: 0; overflow: hidden;">
+      {{template "map" .}}
+      {{template "graph" .}}
+    </div>
+    {{template "activity_sidebar" .}}
+  </div>
+
+  <!-- Segment creation modal -->
+  <div id="segment-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:var(--panel); padding:24px; border-radius:8px; max-width:500px; width:90%;">
+      <h3 style="margin-top:0;">Create Segment</h3>
+      <p id="segment-selection-info" style="margin:12px 0;">Click two points on the map to select a segment.</p>
+      <form id="segment-form">
+        <div style="margin-bottom:12px;">
+          <label style="display:block; margin-bottom:4px;">Name: <span style="color:#e74c3c;">*</span></label>
+          <input type="text" id="segment-name" required style="width:100%; padding:8px; box-sizing:border-box;" />
+        </div>
+        <div style="margin-bottom:12px;">
+          <label style="display:block; margin-bottom:4px;">Description:</label>
+          <textarea id="segment-description" style="width:100%; padding:8px; box-sizing:border-box; min-height:60px;"></textarea>
+        </div>
+        <div style="display:flex; gap:12px; justify-content:flex-end; margin-top:20px;">
+          <button type="button" id="segment-cancel-btn" style="padding:8px 16px;">Cancel</button>
+          <button type="submit" id="segment-submit-btn" style="padding:8px 16px; background:#4cc9f0; color:white; border:none; border-radius:4px; cursor:pointer;">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
+{{end}}
+

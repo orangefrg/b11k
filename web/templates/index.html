@@ -1,0 +1,85 @@
+{{define "index.html"}}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Activities</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css" />
+  <script defer src="/static/app.js"></script>
+</head>
+<body class="app">
+  {{template "topbar" .}}
+  <div class="container">
+    <h1 class="title">Activities</h1>
+            
+
+    <form id="sync-form" {{if not .Authorized}}style="display:none"{{end}} class="form">
+      <label>Start date: <input type="date" name="start" /></label>
+      <label style="margin-left:12px">End date: <input type="date" name="end" /></label>
+      <button type="submit">Sync from Strava</button>
+    </form>
+    {{if not .Authorized}}
+    <p class="meta">Authorize with Strava to enable syncing.</p>
+    {{end}}
+    <div id="sync-progress" style="display:none; margin: 12px 0; padding: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px;">
+      <div id="progress-phase" style="font-weight: bold; margin-bottom: 8px; color: var(--text);"></div>
+      <div style="display: flex; align-items: center; gap: 8px; width: 100%;">
+        <div id="progress-bar-container" style="flex: 1; min-width: 200px; background: #1a1a1a; border-radius: 4px; overflow: hidden; height: 24px; border: 2px solid #4cc9f0; position: relative; box-shadow: inset 0 0 4px rgba(0,0,0,0.5); display: block !important; visibility: visible !important;">
+          <div id="progress-bar" style="background: #4cc9f0; height: 100%; width: 0%; transition: width 0.3s ease; display: block !important; visibility: visible !important; min-height: 24px;"></div>
+        </div>
+        <div id="progress-text" style="min-width: 120px; font-size: 12px; color: var(--text); opacity: 0.9; text-align: right; font-weight: 500;"></div>
+      </div>
+    </div>
+    <pre id="sync-log" class="log"></pre>
+
+    <div class="list">
+      {{range .Activities}}
+      <div class="item">
+        <div class="item-row">
+          <div class="left">
+            <div><a class="link" href="/activity/{{.ID}}">{{.Name}}</a></div>
+            <div class="meta">{{.StartDateTime}} • {{printf "%.1f" (mul .Distance 0.001)}} km • avg {{printf "%.1f" (mul .AverageSpeed 3.6)}} km/h</div>
+          </div>
+          <div class="loc meta">
+            {{if or .LocationCity .LocationCountry}}
+              {{if .LocationCity}}{{.LocationCity}}{{end}}{{if and .LocationCity .LocationCountry}}, {{end}}{{.LocationCountry}}
+            {{end}}
+          </div>
+        </div>
+      </div>
+      {{else}}
+      <div>No activities found.</div>
+      {{end}}
+    </div>
+    
+    <div class="pagination">
+      <div class="pagination-left">
+        {{if gt .TotalPages 1}}
+          {{if .HasPrev}}
+            <a class="link" href="/strava/?page={{sub .CurrentPage 1}}&per_page={{.PerPage}}">&larr; Previous</a>
+          {{end}}
+          <span class="page-info">Page {{.CurrentPage}} of {{.TotalPages}}</span>
+          {{if .HasNext}}
+            <a class="link" href="/strava/?page={{add .CurrentPage 1}}&per_page={{.PerPage}}">Next &rarr;</a>
+          {{end}}
+        {{end}}
+      </div>
+      <div class="pagination-right">
+        <label class="per-page-label">
+          Show: 
+          <select id="per-page-select" onchange="changePerPage(this.value)">
+            <option value="10" {{if eq .PerPage 10}}selected{{end}}>10</option>
+            <option value="20" {{if eq .PerPage 20}}selected{{end}}>20</option>
+            <option value="50" {{if eq .PerPage 50}}selected{{end}}>50</option>
+            <option value="100" {{if eq .PerPage 100}}selected{{end}}>100</option>
+          </select>
+          per page
+        </label>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+{{end}}
+

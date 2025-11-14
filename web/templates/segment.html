@@ -1,0 +1,29 @@
+{{define "segment.html"}}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>{{.Segment.Name}}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src='https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js'></script>
+  <link href='https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css' rel='stylesheet' />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <link rel="stylesheet" href="/static/app.css" />
+  <script>window.__MAPBOX_TOKEN__='{{.MapboxToken}}';</script>
+  <script>window.__SEGMENT_ID__={{.Segment.ID}};</script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body class="app">
+  {{template "topbar" .}}
+  <div class="wrap">
+    <div style="flex: 1; display: flex; flex-direction: column; height: calc(100vh - 60px); min-height: 0; overflow: hidden;">
+      {{template "map" .}}
+      {{template "graph" .}}
+    </div>
+    {{template "segment_sidebar" .}}
+  </div>
+</body>
+</html>
+{{end}}
+

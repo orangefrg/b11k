@@ -1,0 +1,41 @@
+{{define "activity_sidebar"}}
+<div class="side">
+  <div class="control">
+    <a class="link" href="/">&larr; Back to activities</a>
+  </div>
+  <h2 class="h">{{.Activity.Name}}</h2>
+  <div class="control">
+    <button id="create-segment-btn" type="button">Create Segment</button>
+    <a class="link" href="/segments" style="margin-left:12px;">View Segments</a>
+  </div>
+  <div class="control">
+    <label for="color-metric">Color points by:</label>
+    <select id="color-metric">
+      <option value="none">None</option>
+      <option value="speed">Speed</option>
+      <option value="heartrate">Heart rate</option>
+      <option value="hrzones">HR zones</option>
+      <option value="alt">Altitude</option>
+      <option value="grade">Slope</option>
+      <option value="moving">Stops</option>
+      <option value="cadence">Cadence</option>
+    </select>
+  </div>
+  <div class="control">
+    <div id="legend" class="legend" style="display:none"></div>
+  </div>
+  <div class="stat">Start: <span class="muted">{{.Activity.StartDateTime}}</span></div>
+  <div class="stat">Total distance: <span class="muted">{{printf "%.1f" (mul .Activity.Distance 0.001)}} km</span></div>
+  <div class="stat">Avg speed: <span class="muted">{{printf "%.1f" (mul .Activity.AverageSpeed 3.6)}} km/h</span></div>
+  <div class="stat">Max speed: <span class="muted">{{printf "%.1f" (mul .Activity.MaxSpeed 3.6)}} km/h</span></div>
+  <div class="stat">Avg cadence: <span class="muted">{{printf "%.0f" .Activity.AverageCadence}} rpm</span></div>
+  <div class="stat">Avg HR: <span class="muted">{{printf "%.0f" .Activity.AverageHeartrate}} bpm</span></div>
+  <div class="stat">Max HR: <span class="muted">{{printf "%.0f" .Activity.MaxHeartrate}} bpm</span></div>
+  <div class="stat">Elevation gain: <span class="muted">{{printf "%.0f" .Activity.TotalElevationGain}} m</span></div>
+  <div class="stat">Calories: <span class="muted">{{printf "%.0f" (mul .Activity.Kilojoules 0.239006)}} kcal</span></div>
+  {{if or .Activity.LocationCity .Activity.LocationCountry}}
+  <div class="stat">Location: <span class="muted">{{if .Activity.LocationCity}}{{.Activity.LocationCity}}{{end}}{{if and .Activity.LocationCity .Activity.LocationCountry}}, {{end}}{{.Activity.LocationCountry}}</span></div>
+  {{end}}
+</div>
+{{end}}
+

@@ -1,0 +1,35 @@
+{{define "graph"}}
+<div id="graph-container" style="width: 100%; min-height: 300px; margin-top: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; box-sizing: border-box;">
+  <div style="margin-bottom: 12px;">
+    <label style="margin-right: 12px;">X-Axis:
+      <select id="xaxis-select" style="margin-left: 4px; padding: 4px;">
+        <option value="time">Time</option>
+        <option value="distance">Distance</option>
+      </select>
+    </label>
+    <label style="margin-right: 12px;">Metric 1:
+      <select id="metric1-select" style="margin-left: 4px; padding: 4px;">
+        <option value="">None</option>
+        <option value="speed">Speed</option>
+        <option value="heartrate">HR</option>
+        <option value="height">Height</option>
+        <option value="cadence">Cadence</option>
+      </select>
+    </label>
+    <label>Metric 2:
+      <select id="metric2-select" style="margin-left: 4px; padding: 4px;">
+        <option value="">None</option>
+        <option value="speed">Speed</option>
+        <option value="heartrate">HR</option>
+        <option value="height">Height</option>
+        <option value="cadence">Cadence</option>
+      </select>
+    </label>
+  </div>
+  <div id="graph-placeholder" style="text-align: center; padding: 40px; color: var(--text); opacity: 0.6;">
+    {{if hasActivity .}}Select a metric above to display the graph{{else}}Select an activity and a metric above to display the graph{{end}}
+  </div>
+  <canvas id="graph-canvas" style="max-height: 250px; display: none;"></canvas>
+</div>
+{{end}}
+
