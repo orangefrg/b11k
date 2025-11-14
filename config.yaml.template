@@ -1,0 +1,10 @@
+strava_client_id: 111111
+strava_client_secret: dddddddd
+strava_redirect_uri: http://localhost:8080/strava/callback
+mapbox_token: zzzzzzz
+pg_ip: 192.168.1.1
+pg_port: 5432
+pg_db: b11k_db
+pg_user: b11k
+pg_secret: password_secret
+web_port: 8080

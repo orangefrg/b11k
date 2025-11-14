@@ -1,0 +1,21 @@
+{{define "topbar"}}
+<div class="topbar">
+  <div class="topbar-left">
+    <a class="link" href="/strava/">Activities</a>
+    <a class="link" href="/segments" style="margin-left: 16px;">Segments</a>
+  </div>
+  <div class="topbar-right">
+    {{if .Athlete}}
+      <img class="avatar" src="{{.Athlete.Profile}}" alt="avatar"/>
+      <span class="who">{{.Athlete.FirstName}} {{.Athlete.LastName}} (ID {{.Athlete.ID}})</span>
+    {{end}}
+    {{if .ShowLoginCTA}}
+      <a class="link" href="/strava/login">Login</a>
+    {{else if .Authorized}}
+      <a class="link" href="/strava/logout">Logout</a>
+    {{end}}
+  </div>
+</div>
+{{end}}
+
+
