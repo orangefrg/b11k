@@ -1,3 +1,6 @@
+// Copyright (c) 2025 github.com/orangefrg
+// Licensed under the Apache License, Version 2.0
+
 package main
 
 import (
@@ -27,7 +30,9 @@ type Config struct {
 	PGUser             string `yaml:"pg_user"`
 	PGPassword         string `yaml:"pg_secret"`
 	PGDatabase         string `yaml:"pg_db"`
+	WebHost            string `yaml:"web_host"`
 	WebPort            string `yaml:"web_port"`
+	WebProtocol        string `yaml:"web_protocol"` // "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy
 }
 
 func main() {
@@ -47,6 +52,44 @@ func main() {
 		log.Fatalf("Error reading config file: %v", err)
 	}
 	yaml.Unmarshal(yamlFile, &config)
+
+	// Construct redirect URI from host and port if not explicitly provided
+	if config.StravaRedirectURI == "" {
+		webHost := config.WebHost
+		if webHost == "" {
+			webHost = "localhost"
+		}
+		webPort := config.WebPort
+		if webPort == "" {
+			webPort = "8080"
+		}
+		// Determine protocol - default to http, but use web_protocol if set
+		protocol := "http"
+		if config.WebProtocol == "https" {
+			protocol = "https"
+		}
+		
+		// For standard ports (80 for HTTP, 443 for HTTPS), omit port in URL
+		// For non-standard ports, include port in URL
+		var redirectURI string
+		if (protocol == "http" && webPort == "80") || (protocol == "https" && webPort == "443") {
+			// Standard port - omit from URL
+			redirectURI = fmt.Sprintf("%s://%s/strava/callback", protocol, webHost)
+		} else if protocol == "https" {
+			// HTTPS with non-standard port - but if behind proxy, usually omit port
+			// For Cloudflare Tunnel and most reverse proxies, HTTPS URLs don't include port
+			redirectURI = fmt.Sprintf("%s://%s/strava/callback", protocol, webHost)
+		} else {
+			// HTTP with non-standard port - include port
+			redirectURI = fmt.Sprintf("%s://%s:%s/strava/callback", protocol, webHost, webPort)
+		}
+		
+		config.StravaRedirectURI = redirectURI
+		log.Printf("📝 Constructed Strava redirect URI: %s", config.StravaRedirectURI)
+		if protocol == "http" {
+			log.Printf("💡 If behind Cloudflare Tunnel or reverse proxy with HTTPS, set web_protocol: https in config.yaml")
+		}
+	}
 
 	// Connect to database
 	ctx := context.Background()
@@ -100,7 +143,9 @@ func main() {
 		PGUser:             config.PGUser,
 		PGPassword:         config.PGPassword,
 		PGDatabase:         config.PGDatabase,
+		WebHost:            config.WebHost,
 		WebPort:            config.WebPort,
+		WebProtocol:        config.WebProtocol,
 	})
 }
 

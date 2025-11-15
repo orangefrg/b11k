@@ -10,7 +10,7 @@ echo "=========================================="
 mkdir -p bin
 
 # Set build variables
-BINARY_NAME="strava-tracker"
+BINARY_NAME="b11k"
 BUILD_DIR="bin"
 TARGET_OS="linux"
 TARGET_ARCH="amd64"
@@ -23,6 +23,16 @@ echo ""
 # Build the application
 echo "⚙️  Compiling..."
 GOOS=${TARGET_OS} GOARCH=${TARGET_ARCH} go build -o ${BUILD_DIR}/${BINARY_NAME} ./cmd
+
+# Copy config.yaml to bin directory if it exists
+if [ -f "config.yaml" ]; then
+    echo "📋 Copying config.yaml to ${BUILD_DIR}/..."
+    cp config.yaml ${BUILD_DIR}/config.yaml
+    echo "✅ config.yaml copied to ${BUILD_DIR}/"
+else
+    echo "⚠️  Warning: config.yaml not found in root directory"
+    echo "   You'll need to create ${BUILD_DIR}/config.yaml before running the application"
+fi
 
 # Check if build was successful
 if [ $? -eq 0 ]; then

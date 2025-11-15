@@ -46,17 +46,25 @@ func exchangeCodeForToken(config StravaAuthConfig, code string) (string, error) 
 	data.Set("client_secret", config.ClientSecret)
 	data.Set("code", code)
 	data.Set("grant_type", "authorization_code")
+	// Include redirect_uri - Strava requires it to match exactly what was used in authorization
+	if config.RedirectURI != "" {
+		data.Set("redirect_uri", config.RedirectURI)
+	}
 
 	req, err := http.NewRequest("POST", "https://www.strava.com/oauth/token", strings.NewReader(data.Encode()))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		// Provide more detailed error for SSL/TLS issues
+		if strings.Contains(err.Error(), "x509") || strings.Contains(err.Error(), "certificate") || strings.Contains(err.Error(), "tls") {
+			return "", fmt.Errorf("SSL/TLS error connecting to Strava API: %w. This may indicate missing CA certificates or network issues", err)
+		}
+		return "", fmt.Errorf("failed to connect to Strava API: %w", err)
 	}
 	defer resp.Body.Close()
 
