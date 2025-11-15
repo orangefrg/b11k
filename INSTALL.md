@@ -198,28 +198,32 @@ Create a new file named `config.yaml` in the project root with the following con
 ```yaml
 strava_client_id: your_strava_client_id
 strava_client_secret: your_strava_client_secret
-strava_redirect_uri: http://localhost:8080/strava/callback
+# strava_redirect_uri: http://localhost:8080/strava/callback  # Optional: auto-constructed from web_protocol, web_host and web_port if not provided
 mapbox_token: your_mapbox_token
 pg_ip: localhost
 pg_port: 5432
 pg_db: b11k_db
 pg_user: b11k
 pg_secret: your_password
+web_host: localhost  # Hostname or IP address for the web server (default: localhost)
 web_port: 8080
+web_protocol: http  # "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy with HTTPS termination
 ```
 
 #### Configuration Fields
 
 - **strava_client_id**: Your Strava API Client ID (see below for how to get it)
 - **strava_client_secret**: Your Strava API Client Secret
-- **strava_redirect_uri**: The callback URL after Strava authentication (must match your Strava app settings)
+- **strava_redirect_uri**: (Optional) The callback URL after Strava authentication. If not provided, it will be automatically constructed from `web_protocol`, `web_host` and `web_port` as `web_protocol://web_host:web_port/strava/callback`. Must match your Strava app settings.
 - **mapbox_token**: Your Mapbox access token for map visualization (optional but recommended)
 - **pg_ip**: PostgreSQL server hostname or IP address
 - **pg_port**: PostgreSQL server port (default: 5432)
 - **pg_db**: PostgreSQL database name
 - **pg_user**: PostgreSQL username
 - **pg_secret**: PostgreSQL password
-- **web_port**: Port for the web server (default: 8080)
+- **web_host**: Hostname or IP address for the web server (default: `localhost`). Used to construct the Strava redirect URI if `strava_redirect_uri` is not explicitly set.
+- **web_port**: Port for the web server to listen on (default: 8080). **Important**: Use a non-privileged port (1024 or higher). Ports below 1024 (like 80, 443) require root privileges. When behind Cloudflare Tunnel or a reverse proxy, the application listens on a regular port (e.g., 8080) and the proxy handles HTTPS termination.
+- **web_protocol**: Protocol for constructing the redirect URI - `"http"` or `"https"` (default: `"http"`). **Important**: This does NOT affect which port the server listens on. Set to `"https"` when behind Cloudflare Tunnel, reverse proxy, or load balancer that provides HTTPS termination. This ensures the redirect URI is constructed with `https://` to match what the browser sees through the proxy.
 
 **Important**: Replace all placeholder values with your actual credentials and database information.
 
@@ -227,8 +231,27 @@ web_port: 8080
 
 1. Go to [Strava API Settings](https://www.strava.com/settings/api)
 2. Create a new application
-3. Set the Authorization Callback Domain (e.g., `localhost:8080`)
+3. Set the Authorization Callback Domain to match your `web_host` and `web_port` (e.g., `localhost:8080` for local development, or your domain for production)
 4. Copy your Client ID and Client Secret
+
+**Important**: The callback URL in your Strava app settings must match the redirect URI used by b11k. If you don't specify `strava_redirect_uri` in your config, it will be automatically constructed as `web_protocol://web_host:web_port/strava/callback`.
+
+**For Cloudflare Tunnel or Reverse Proxy**: If you're using Cloudflare Tunnel, nginx, or another reverse proxy that provides HTTPS termination:
+
+1. **Use a non-privileged port** (1024 or higher) for `web_port` - the application listens on this port internally (e.g., 8080)
+2. **Set `web_protocol: https`** - this tells the app to construct redirect URIs with `https://` to match what the browser sees
+3. **Configure your proxy** to forward HTTPS traffic to the application's internal port
+
+Example for Cloudflare Tunnel:
+```yaml
+web_host: priv.o-range.company
+web_port: 8080  # Application listens on port 8080 (non-privileged)
+web_protocol: https  # Redirect URIs use https:// to match browser
+```
+
+**Note**: The application does NOT need to listen on port 443. Cloudflare Tunnel handles HTTPS termination and proxies to your application on port 8080 (or whatever port you configure).
+
+Make sure your Strava app's callback domain matches your `web_host` and `web_port` configuration, and uses the same protocol (`http://` or `https://`).
 
 ### Getting Mapbox Token
 
@@ -446,13 +469,13 @@ version: '3.8'
 
 services:
   postgres:
-    image: postgis/postgis:15-3.3
+    image: postgis/postgis:18-3.6-alpine
     environment:
       POSTGRES_DB: b11k_db
       POSTGRES_USER: b11k
       POSTGRES_PASSWORD: your_password
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     ports:
       - "5432:5432"
     healthcheck:

@@ -1,10 +1,12 @@
 strava_client_id: 111111
 strava_client_secret: dddddddd
-strava_redirect_uri: http://localhost:8080/strava/callback
+# strava_redirect_uri: http://localhost:8080/strava/callback  # Optional: auto-constructed from web_protocol, web_host and web_port if not provided
 mapbox_token: zzzzzzz
 pg_ip: 192.168.1.1
 pg_port: 5432
 pg_db: b11k_db
 pg_user: b11k
 pg_secret: password_secret
-web_port: 8080
+web_host: localhost  # Hostname or IP address (default: localhost)
+web_port: 8080  # Port to listen on (use non-privileged port 1024+, not 80/443)
+web_protocol: http  # "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy (only affects redirect URI, not listening port)

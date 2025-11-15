@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -30,7 +31,9 @@ type Config struct {
 	PGUser             string
 	PGPassword         string
 	PGDatabase         string
+	WebHost            string
 	WebPort            string
+	WebProtocol        string
 }
 
 type server struct {
@@ -507,11 +510,17 @@ func (s *server) handleStravaCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
+	
+	// Log the callback for debugging
+	log.Printf("🔐 Strava callback received from: %s", r.RemoteAddr)
+	log.Printf("📋 Using redirect URI: %s", s.cfg.StravaRedirectURI)
+	
 	authCfg := strava.NewStravaAuthConfig(s.cfg.StravaClientID, s.cfg.StravaClientSecret, s.cfg.StravaRedirectURI)
 	tok, err := strava.ExchangeCodeForToken(*authCfg, code)
 	if err != nil {
-		log.Printf("token exchange error: %v", err)
-		http.Error(w, "token exchange failed", http.StatusBadGateway)
+		log.Printf("❌ Token exchange error: %v", err)
+		log.Printf("💡 Check that your Strava app's redirect URI matches: %s", s.cfg.StravaRedirectURI)
+		http.Error(w, fmt.Sprintf("token exchange failed: %v", err), http.StatusBadGateway)
 		return
 	}
 	s.token = tok
