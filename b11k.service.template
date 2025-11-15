@@ -1,0 +1,41 @@
+[Unit]
+Description=b11k Strava Bike Activity Tracker
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=b11k
+Group=b11k
+WorkingDirectory=/opt/b11k
+ExecStart=/opt/b11k/b11k
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=b11k
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits (adjust as needed)
+LimitNOFILE=65536
+
+# Memory limits
+# MemoryMax: Hard limit on memory usage (will be killed if exceeded)
+# MemoryHigh: Soft limit on memory usage (throttled if exceeded)
+# Default: 512M max, 256M high (adjust based on your needs)
+MemoryMax=1024M
+MemoryHigh=512M
+
+# CPU limits
+# CPUQuota: Maximum CPU time (percentage of one CPU core)
+# Example: 100% = 1 core, 200% = 2 cores, 50% = half a core
+# Default: 100% (1 CPU core)
+CPUQuota=100%
+CPUAccounting=true
+
+[Install]
+WantedBy=multi-user.target
+

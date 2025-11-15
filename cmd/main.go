@@ -1,3 +1,6 @@
+// Copyright (c) 2025 github.com/orangefrg
+// Licensed under the Apache License, Version 2.0
+
 package main
 
 import (
