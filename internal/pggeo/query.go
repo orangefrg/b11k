@@ -19,7 +19,7 @@ func GetActivityByID(ctx context.Context, conn *pgx.Conn, athleteID, activityID 
 	SELECT id, athlete_id, name, distance, moving_time, elapsed_time, total_elevation_gain,
 		   type, sport_type, workout_type, start_date, utc_offset,
 		   start_lat, start_lng, end_lat, end_lng,
-		   location_city, location_state, location_country, gear_id,
+		   location_city, location_state, location_country, gear_id, gear_name,
 		   average_speed, max_speed, average_cadence, average_watts,
 		   kilojoules, average_heartrate, max_heartrate, max_watts, suffer_score
 	FROM activity_summaries
@@ -37,7 +37,7 @@ func GetActivityByID(ctx context.Context, conn *pgx.Conn, athleteID, activityID 
 		&activity.ID, &activity.AthleteID, &activity.Name, &activity.Distance, &activity.MovingTime, &activity.ElapsedTime,
 		&activity.TotalElevationGain, &activity.Type, &activity.SportType, &workoutType,
 		&activity.StartDateTime, &activity.UtcOffset, &startLat, &startLng, &endLat, &endLng,
-		&locationCity, &locationState, &activity.LocationCountry, &activity.GearID,
+		&locationCity, &locationState, &activity.LocationCountry, &activity.GearID, &activity.GearName,
 		&activity.AverageSpeed, &activity.MaxSpeed, &activity.AverageCadence, &activity.AverageWatts,
 		&activity.Kilojoules, &activity.AverageHeartrate, &activity.MaxHeartrate, &activity.MaxWatts,
 		&activity.SufferScore,
@@ -64,13 +64,22 @@ func GetActivityByID(ctx context.Context, conn *pgx.Conn, athleteID, activityID 
 	return &activity, nil
 }
 
+func UpdateGearNameForGearID(ctx context.Context, conn *pgx.Conn, athleteID int64, gearID, gearName string) error {
+	_, err := conn.Exec(ctx, `
+		UPDATE activity_summaries
+		SET gear_name = $1, updated_at = NOW()
+		WHERE athlete_id = $2 AND gear_id = $3
+	`, gearName, athleteID, gearID)
+	return err
+}
+
 // GetActivitiesByDateRange retrieves activities within a date range for a specific athlete
 func GetActivitiesByDateRange(ctx context.Context, conn *pgx.Conn, athleteID int64, startDate, endDate time.Time) ([]strava.ActivitySummary, error) {
 	query := `
 	SELECT id, athlete_id, name, distance, moving_time, elapsed_time, total_elevation_gain,
 		   type, sport_type, workout_type, start_date, utc_offset,
 		   start_lat, start_lng, end_lat, end_lng,
-		   location_city, location_state, location_country, gear_id,
+		   location_city, location_state, location_country, gear_id, gear_name,
 		   average_speed, max_speed, average_cadence, average_watts,
 		   kilojoules, average_heartrate, max_heartrate, max_watts, suffer_score
 	FROM activity_summaries
@@ -95,7 +104,7 @@ func GetActivitiesByDateRange(ctx context.Context, conn *pgx.Conn, athleteID int
 			&activity.ID, &activity.AthleteID, &activity.Name, &activity.Distance, &activity.MovingTime, &activity.ElapsedTime,
 			&activity.TotalElevationGain, &activity.Type, &activity.SportType, &workoutType,
 			&activity.StartDateTime, &activity.UtcOffset, &startLat, &startLng, &endLat, &endLng,
-			&locationCity, &locationState, &activity.LocationCountry, &activity.GearID,
+			&locationCity, &locationState, &activity.LocationCountry, &activity.GearID, &activity.GearName,
 			&activity.AverageSpeed, &activity.MaxSpeed, &activity.AverageCadence, &activity.AverageWatts,
 			&activity.Kilojoules, &activity.AverageHeartrate, &activity.MaxHeartrate, &activity.MaxWatts,
 			&activity.SufferScore,
@@ -128,7 +137,7 @@ func GetAllActivities(ctx context.Context, conn *pgx.Conn, athleteID int64) ([]s
 	SELECT id, athlete_id, name, distance, moving_time, elapsed_time, total_elevation_gain,
 		   type, sport_type, workout_type, start_date, utc_offset,
 		   start_lat, start_lng, end_lat, end_lng,
-		   location_city, location_state, location_country, gear_id,
+		   location_city, location_state, location_country, gear_id, gear_name,
 		   average_speed, max_speed, average_cadence, average_watts,
 		   kilojoules, average_heartrate, max_heartrate, max_watts, suffer_score
 	FROM activity_summaries
@@ -153,7 +162,7 @@ func GetAllActivities(ctx context.Context, conn *pgx.Conn, athleteID int64) ([]s
 			&activity.ID, &activity.AthleteID, &activity.Name, &activity.Distance, &activity.MovingTime, &activity.ElapsedTime,
 			&activity.TotalElevationGain, &activity.Type, &activity.SportType, &workoutType,
 			&activity.StartDateTime, &activity.UtcOffset, &startLat, &startLng, &endLat, &endLng,
-			&locationCity, &locationState, &activity.LocationCountry, &activity.GearID,
+			&locationCity, &locationState, &activity.LocationCountry, &activity.GearID, &activity.GearName,
 			&activity.AverageSpeed, &activity.MaxSpeed, &activity.AverageCadence, &activity.AverageWatts,
 			&activity.Kilojoules, &activity.AverageHeartrate, &activity.MaxHeartrate, &activity.MaxWatts,
 			&activity.SufferScore,
@@ -183,10 +192,10 @@ func GetAllActivities(ctx context.Context, conn *pgx.Conn, athleteID int64) ([]s
 // GetActivitiesInBoundingBox retrieves activities that intersect with a bounding box
 func GetActivitiesInBoundingBox(ctx context.Context, conn *pgx.Conn, minLat, minLng, maxLat, maxLng float64) ([]strava.ActivitySummary, error) {
 	query := `
-	SELECT s.id, s.name, s.distance, s.moving_time, s.elapsed_time, s.total_elevation_gain,
+	SELECT s.id, s.athlete_id, s.name, s.distance, s.moving_time, s.elapsed_time, s.total_elevation_gain,
 		   s.type, s.sport_type, s.workout_type, s.start_date, s.utc_offset,
 		   s.start_lat, s.start_lng, s.end_lat, s.end_lng,
-		   s.location_city, s.location_state, s.location_country, s.gear_id,
+		   s.location_city, s.location_state, s.location_country, s.gear_id, s.gear_name,
 		   s.average_speed, s.max_speed, s.average_cadence, s.average_watts,
 		   s.kilojoules, s.average_heartrate, s.max_heartrate, s.max_watts, s.suffer_score
 	FROM activity_summaries s
@@ -212,7 +221,7 @@ func GetActivitiesInBoundingBox(ctx context.Context, conn *pgx.Conn, minLat, min
 			&activity.ID, &activity.AthleteID, &activity.Name, &activity.Distance, &activity.MovingTime, &activity.ElapsedTime,
 			&activity.TotalElevationGain, &activity.Type, &activity.SportType, &workoutType,
 			&activity.StartDateTime, &activity.UtcOffset, &startLat, &startLng, &endLat, &endLng,
-			&locationCity, &locationState, &activity.LocationCountry, &activity.GearID,
+			&locationCity, &locationState, &activity.LocationCountry, &activity.GearID, &activity.GearName,
 			&activity.AverageSpeed, &activity.MaxSpeed, &activity.AverageCadence, &activity.AverageWatts,
 			&activity.Kilojoules, &activity.AverageHeartrate, &activity.MaxHeartrate, &activity.MaxWatts,
 			&activity.SufferScore,
@@ -290,6 +299,85 @@ type GraphData struct {
 	Heartrate []GraphDataPoint `json:"heartrate,omitempty"`
 	Height    []GraphDataPoint `json:"height,omitempty"`
 	Cadence   []GraphDataPoint `json:"cadence,omitempty"`
+}
+
+type HRZoneDistribution struct {
+	Zone       int     `json:"zone"`
+	Label      string  `json:"label"`
+	Min        int     `json:"min"`
+	Max        int     `json:"max"`
+	Samples    int     `json:"samples"`
+	Percentage float64 `json:"percentage"`
+}
+
+func GetHRZoneDistributionForActivity(ctx context.Context, conn *pgx.Conn, athleteID, activityID int64, hrZones *strava.HeartRateZones) ([]HRZoneDistribution, error) {
+	samples, err := GetPointSamplesForActivity(ctx, conn, athleteID, activityID)
+	if err != nil {
+		return nil, err
+	}
+	return calculateHRZoneDistribution(samples, hrZones), nil
+}
+
+func GetHRZoneDistributionForSegmentInActivity(ctx context.Context, conn *pgx.Conn, athleteID, activityID, segmentID int64, toleranceMeters float64, hrZones *strava.HeartRateZones) ([]HRZoneDistribution, error) {
+	var startIndex, endIndex int
+	if err := conn.QueryRow(ctx,
+		`SELECT * FROM find_segment_point_indices($1, $2, $3, $4)`,
+		segmentID, activityID, athleteID, toleranceMeters,
+	).Scan(&startIndex, &endIndex); err != nil {
+		if err == pgx.ErrNoRows {
+			return []HRZoneDistribution{}, nil
+		}
+		return nil, err
+	}
+
+	samples, err := GetPointSamplesForActivity(ctx, conn, athleteID, activityID)
+	if err != nil {
+		return nil, err
+	}
+	segmentSamples := make([]PointSample, 0, endIndex-startIndex+1)
+	for _, sample := range samples {
+		if sample.PointIndex >= startIndex && sample.PointIndex <= endIndex {
+			segmentSamples = append(segmentSamples, sample)
+		}
+	}
+	return calculateHRZoneDistribution(segmentSamples, hrZones), nil
+}
+
+func calculateHRZoneDistribution(samples []PointSample, hrZones *strava.HeartRateZones) []HRZoneDistribution {
+	if hrZones == nil || len(hrZones.Zones) == 0 {
+		return []HRZoneDistribution{}
+	}
+
+	distribution := make([]HRZoneDistribution, len(hrZones.Zones))
+	for i, zone := range hrZones.Zones {
+		distribution[i] = HRZoneDistribution{
+			Zone:  i + 1,
+			Label: fmt.Sprintf("Z%d", i+1),
+			Min:   zone.Min,
+			Max:   zone.Max,
+		}
+	}
+
+	total := 0
+	for _, sample := range samples {
+		if sample.Heartrate == nil || *sample.Heartrate <= 0 {
+			continue
+		}
+		zone := calculateHRZone(*sample.Heartrate, hrZones)
+		if zone <= 0 || zone > len(distribution) {
+			continue
+		}
+		distribution[zone-1].Samples++
+		total++
+	}
+
+	if total == 0 {
+		return distribution
+	}
+	for i := range distribution {
+		distribution[i].Percentage = float64(distribution[i].Samples) * 100 / float64(total)
+	}
+	return distribution
 }
 
 // GetGraphDataForActivity retrieves graph data for specified metrics for an activity
@@ -651,15 +739,16 @@ type SegmentActivityMatch struct {
 // ActivityWithMatch represents an activity with its match metadata
 type ActivityWithMatch struct {
 	strava.ActivitySummary
-	MinDistanceM       float64  `json:"min_distance_m"`
-	OverlapLengthM     float64  `json:"overlap_length_m"`
-	OverlapPercentage  float64  `json:"overlap_percentage"`
-	StartDateFormatted string   `json:"start_date_formatted"`             // Formatted date for display
-	SegmentAvgHR       *float64 `json:"segment_avg_hr,omitempty"`         // Segment-specific avg HR
-	SegmentAvgSpeed    *float64 `json:"segment_avg_speed,omitempty"`      // Segment-specific avg speed
-	SegmentDistance    *float64 `json:"segment_distance,omitempty"`       // Segment-specific distance
-	SegmentElevation   *float64 `json:"segment_elevation_gain,omitempty"` // Segment-specific elevation gain
-	SegmentElapsedSecs *float64 `json:"segment_elapsed_seconds,omitempty"`
+	MinDistanceM       float64              `json:"min_distance_m"`
+	OverlapLengthM     float64              `json:"overlap_length_m"`
+	OverlapPercentage  float64              `json:"overlap_percentage"`
+	StartDateFormatted string               `json:"start_date_formatted"`             // Formatted date for display
+	SegmentAvgHR       *float64             `json:"segment_avg_hr,omitempty"`         // Segment-specific avg HR
+	SegmentAvgSpeed    *float64             `json:"segment_avg_speed,omitempty"`      // Segment-specific avg speed
+	SegmentDistance    *float64             `json:"segment_distance,omitempty"`       // Segment-specific distance
+	SegmentElevation   *float64             `json:"segment_elevation_gain,omitempty"` // Segment-specific elevation gain
+	SegmentElapsedSecs *float64             `json:"segment_elapsed_seconds,omitempty"`
+	SegmentHRZones     []HRZoneDistribution `json:"segment_hr_zones,omitempty"`
 }
 
 // GetActivitiesForSegment retrieves activities matching a segment, using cache when available
@@ -910,7 +999,7 @@ func GetActivitiesByIDs(ctx context.Context, conn *pgx.Conn, athleteID int64, ac
 	SELECT id, athlete_id, name, distance, moving_time, elapsed_time, total_elevation_gain,
 		   type, sport_type, workout_type, start_date, utc_offset,
 		   start_lat, start_lng, end_lat, end_lng,
-		   location_city, location_state, location_country, gear_id,
+		   location_city, location_state, location_country, gear_id, gear_name,
 		   average_speed, max_speed, average_cadence, average_watts,
 		   kilojoules, average_heartrate, max_heartrate, max_watts, suffer_score
 	FROM activity_summaries
@@ -934,7 +1023,7 @@ func GetActivitiesByIDs(ctx context.Context, conn *pgx.Conn, athleteID int64, ac
 			&activity.ID, &activity.AthleteID, &activity.Name, &activity.Distance, &activity.MovingTime, &activity.ElapsedTime,
 			&activity.TotalElevationGain, &activity.Type, &activity.SportType, &workoutType,
 			&activity.StartDateTime, &activity.UtcOffset, &startLat, &startLng, &endLat, &endLng,
-			&locationCity, &locationState, &activity.LocationCountry, &activity.GearID,
+			&locationCity, &locationState, &activity.LocationCountry, &activity.GearID, &activity.GearName,
 			&activity.AverageSpeed, &activity.MaxSpeed, &activity.AverageCadence, &activity.AverageWatts,
 			&activity.Kilojoules, &activity.AverageHeartrate, &activity.MaxHeartrate, &activity.MaxWatts,
 			&activity.SufferScore,

@@ -1,0 +1,90 @@
+{{define "profile.html"}}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Profile</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css" />
+  <script defer src="/static/app.js"></script>
+</head>
+<body class="app">
+  {{template "topbar" .}}
+  <div class="container profile-page">
+    <div class="profile-head">
+      <div>
+        <h1 class="title">Profile</h1>
+        {{if .Athlete}}
+        <p class="meta">{{.Athlete.FirstName}} {{.Athlete.LastName}} · Strava ID {{.Athlete.ID}}</p>
+        {{end}}
+      </div>
+      <a class="button-link" href="/strava/logout">Logout</a>
+    </div>
+
+    <section class="profile-grid">
+      <div class="profile-panel">
+        <span class="profile-label">Total activities</span>
+        <strong class="profile-value">{{.TotalActivities}}</strong>
+      </div>
+      <div class="profile-panel">
+        <span class="profile-label">Total bike distance</span>
+        <strong class="profile-value">{{printf "%.1f" .TotalBikeKM}} km</strong>
+      </div>
+      <div class="profile-panel">
+        <span class="profile-label">Busiest month</span>
+        {{if .BestMonth.Label}}
+        <strong class="profile-value">{{.BestMonth.Label}}</strong>
+        <span class="meta">{{.BestMonth.Activities}} activities</span>
+        {{else}}
+        <strong class="profile-value">n/a</strong>
+        {{end}}
+      </div>
+      <div class="profile-panel">
+        <span class="profile-label">Busiest year</span>
+        {{if .BestYear.Label}}
+        <strong class="profile-value">{{.BestYear.Label}}</strong>
+        <span class="meta">{{.BestYear.Activities}} activities</span>
+        {{else}}
+        <strong class="profile-value">n/a</strong>
+        {{end}}
+      </div>
+    </section>
+
+    <section class="profile-section">
+      <h2>Bike Distance</h2>
+      {{if .HasRecordedRides}}
+      <div class="profile-list">
+        {{range .BikeStats}}
+        <div class="profile-row">
+          <div>
+            <strong>{{.Label}}</strong>
+            <div class="meta">{{.Activities}} activities</div>
+          </div>
+          <strong>{{printf "%.1f" .DistanceKM}} km</strong>
+        </div>
+        {{end}}
+      </div>
+      {{else}}
+      <p class="meta">No bike activities found in the local database.</p>
+      {{end}}
+    </section>
+
+    <section class="profile-section">
+      <h2>Heart Rate Zones</h2>
+      {{if .HRZones}}
+      <div class="hr-zone-list">
+        {{range .HRZones}}
+        <div class="profile-row">
+          <strong>{{.Label}}</strong>
+          <span>{{.Range}}</span>
+        </div>
+        {{end}}
+      </div>
+      {{else}}
+      <p class="meta">Heart rate zones are not available{{if .HRZonesError}}: {{.HRZonesError}}{{end}}</p>
+      {{end}}
+    </section>
+  </div>
+</body>
+</html>
+{{end}}

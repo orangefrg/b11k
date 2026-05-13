@@ -41,12 +41,12 @@ func InsertActivitySummary(ctx context.Context, conn *pgx.Conn, activity *strava
 		id, athlete_id, name, distance, moving_time, elapsed_time, total_elevation_gain,
 		type, sport_type, workout_type, start_date, utc_offset,
 		start_lat, start_lng, end_lat, end_lng,
-		location_city, location_state, location_country, gear_id,
+		location_city, location_state, location_country, gear_id, gear_name,
 		average_speed, max_speed, average_cadence, average_watts,
 		kilojoules, average_heartrate, max_heartrate, max_watts, suffer_score
 	) VALUES (
 		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		$16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
+		$16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30
 	)`
 
 	var startLat, startLng, endLat, endLng *float64
@@ -64,7 +64,7 @@ func InsertActivitySummary(ctx context.Context, conn *pgx.Conn, activity *strava
 		activity.TotalElevationGain, activity.Type, activity.SportType, activity.WorkoutType,
 		activity.StartDateTime, activity.UtcOffset, startLat, startLng, endLat, endLng,
 		activity.LocationCity, activity.LocationState, activity.LocationCountry, activity.GearID,
-		activity.AverageSpeed, activity.MaxSpeed, activity.AverageCadence, activity.AverageWatts,
+		activity.GearName, activity.AverageSpeed, activity.MaxSpeed, activity.AverageCadence, activity.AverageWatts,
 		activity.Kilojoules, activity.AverageHeartrate, activity.MaxHeartrate, activity.MaxWatts,
 		activity.SufferScore,
 	)
@@ -191,7 +191,7 @@ func InsertPointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.Bi
 			lat := activity.LatLngStream.Data[i][0]
 			lng := activity.LatLngStream.Data[i][1]
 			locationWKT = fmt.Sprintf("POINT(%.8f %.8f)", lng, lat) // lng, lat for PostGIS
-			
+
 			// Calculate cumulative distance
 			if hasPrevPoint {
 				cumulativeDistance += haversineDistance(prevLat, prevLng, lat, lng)
@@ -267,12 +267,12 @@ func InsertActivitySummaryUpsert(ctx context.Context, conn *pgx.Conn, activity *
 		id, athlete_id, name, distance, moving_time, elapsed_time, total_elevation_gain,
 		type, sport_type, workout_type, start_date, utc_offset,
 		start_lat, start_lng, end_lat, end_lng,
-		location_city, location_state, location_country, gear_id,
+		location_city, location_state, location_country, gear_id, gear_name,
 		average_speed, max_speed, average_cadence, average_watts,
 		kilojoules, average_heartrate, max_heartrate, max_watts, suffer_score
 	) VALUES (
 		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		$16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
+		$16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30
 	) ON CONFLICT (id) DO UPDATE SET
 		athlete_id = EXCLUDED.athlete_id,
 		name = EXCLUDED.name,
@@ -293,6 +293,7 @@ func InsertActivitySummaryUpsert(ctx context.Context, conn *pgx.Conn, activity *
 		location_state = EXCLUDED.location_state,
 		location_country = EXCLUDED.location_country,
 		gear_id = EXCLUDED.gear_id,
+		gear_name = EXCLUDED.gear_name,
 		average_speed = EXCLUDED.average_speed,
 		max_speed = EXCLUDED.max_speed,
 		average_cadence = EXCLUDED.average_cadence,
@@ -320,7 +321,7 @@ func InsertActivitySummaryUpsert(ctx context.Context, conn *pgx.Conn, activity *
 		activity.TotalElevationGain, activity.Type, activity.SportType, activity.WorkoutType,
 		activity.StartDateTime, activity.UtcOffset, startLat, startLng, endLat, endLng,
 		activity.LocationCity, activity.LocationState, activity.LocationCountry, activity.GearID,
-		activity.AverageSpeed, activity.MaxSpeed, activity.AverageCadence, activity.AverageWatts,
+		activity.GearName, activity.AverageSpeed, activity.MaxSpeed, activity.AverageCadence, activity.AverageWatts,
 		activity.Kilojoules, activity.AverageHeartrate, activity.MaxHeartrate, activity.MaxWatts,
 		activity.SufferScore,
 	)
@@ -467,7 +468,7 @@ func ReplacePointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.B
 			lat := activity.LatLngStream.Data[i][0]
 			lng := activity.LatLngStream.Data[i][1]
 			locationWKT = fmt.Sprintf("POINT(%.8f %.8f)", lng, lat) // lng, lat for PostGIS
-			
+
 			// Calculate cumulative distance
 			if hasPrevPoint {
 				cumulativeDistance += haversineDistance(prevLat, prevLng, lat, lng)

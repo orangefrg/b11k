@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -17,6 +18,8 @@ type FavoriteSegment struct {
 	SegmentGeog           string   `json:"segment_geog"` // WKT representation
 	SegmentGeogSimplified *string  `json:"segment_geog_simplified,omitempty"`
 	ElevationGainM        *float64 `json:"elevation_gain_m,omitempty"`
+	ElevationLossM        *float64 `json:"elevation_loss_m,omitempty"`
+	NetElevationM         *float64 `json:"net_elevation_m,omitempty"`
 	CreatedAt             string   `json:"created_at"`
 	UpdatedAt             string   `json:"updated_at"`
 }
@@ -29,6 +32,34 @@ type SegmentMatchResult struct {
 	MinDistanceM      float64 `json:"min_distance_m"`
 	OverlapLengthM    float64 `json:"overlap_length_m"`
 	OverlapPercentage float64 `json:"overlap_percentage"`
+}
+
+// SegmentDashboardSummary is a compact, presentation-ready segment overview.
+type SegmentDashboardSummary struct {
+	ID            int64
+	Name          string
+	Description   *string
+	CreatedAt     string
+	DistanceLabel string
+	NetRiseLabel  string
+	AscentLabel   string
+	SlopeLabel    string
+	Direction     string
+	DirectionKey  string
+	Attempts      int
+	MinTimeLabel  string
+	MaxTimeLabel  string
+	MinHRLabel    string
+	MaxHRLabel    string
+	SortBestTime  float64
+	SortWorstTime float64
+	SortAttempts  int
+	SortMinHR     float64
+	SortMaxHR     float64
+	SortSlope     float64
+	SortAscent    float64
+	SortDirection string
+	SortName      string
 }
 
 // InsertFavoriteSegment inserts a new favorite segment
@@ -49,28 +80,40 @@ func InsertFavoriteSegment(ctx context.Context, conn *pgx.Conn, athleteID int64,
 
 	// Calculate elevation gain from point samples if available
 	var elevationGain *float64
+	var elevationLoss *float64
+	var netElevation *float64
 	if len(pointSamples) > 0 {
 		totalGain := 0.0
+		totalLoss := 0.0
 		for i := 1; i < len(pointSamples); i++ {
 			if pointSamples[i].Altitude != nil && pointSamples[i-1].Altitude != nil {
 				diff := *pointSamples[i].Altitude - *pointSamples[i-1].Altitude
 				if diff > 0 {
 					totalGain += diff
+				} else if diff < 0 {
+					totalLoss += -diff
 				}
 			}
 		}
 		if totalGain > 0 {
 			elevationGain = &totalGain
 		}
+		if totalLoss > 0 {
+			elevationLoss = &totalLoss
+		}
+		if pointSamples[0].Altitude != nil && pointSamples[len(pointSamples)-1].Altitude != nil {
+			net := *pointSamples[len(pointSamples)-1].Altitude - *pointSamples[0].Altitude
+			netElevation = &net
+		}
 	}
 
 	query := `
-	INSERT INTO favorite_segments (athlete_id, name, description, segment_geog, elevation_gain_m)
-	VALUES ($1, $2, $3, make_route_geog_from_lonlat($4, $5), $6)
+	INSERT INTO favorite_segments (athlete_id, name, description, segment_geog, elevation_gain_m, elevation_loss_m, net_elevation_m)
+	VALUES ($1, $2, $3, make_route_geog_from_lonlat($4, $5), $6, $7, $8)
 	RETURNING id, athlete_id, name, description, 
 		ST_AsText(segment_geog::geometry) as segment_geog,
 		ST_AsText(segment_geog_simplified::geometry) as segment_geog_simplified,
-		elevation_gain_m,
+		elevation_gain_m, elevation_loss_m, net_elevation_m,
 		created_at::text, updated_at::text
 	`
 
@@ -80,10 +123,10 @@ func InsertFavoriteSegment(ctx context.Context, conn *pgx.Conn, athleteID int64,
 		desc = &description
 	}
 
-	err := conn.QueryRow(ctx, query, athleteID, name, desc, lons, lats, elevationGain).Scan(
+	err := conn.QueryRow(ctx, query, athleteID, name, desc, lons, lats, elevationGain, elevationLoss, netElevation).Scan(
 		&segment.ID, &segment.AthleteID, &segment.Name, &segment.Description,
 		&segment.SegmentGeog, &segment.SegmentGeogSimplified,
-		&segment.ElevationGainM,
+		&segment.ElevationGainM, &segment.ElevationLossM, &segment.NetElevationM,
 		&segment.CreatedAt, &segment.UpdatedAt,
 	)
 
@@ -107,7 +150,7 @@ func GetFavoriteSegment(ctx context.Context, conn *pgx.Conn, segmentID int64) (*
 	SELECT id, athlete_id, name, description,
 		ST_AsText(segment_geog::geometry) as segment_geog,
 		ST_AsText(segment_geog_simplified::geometry) as segment_geog_simplified,
-		elevation_gain_m,
+		elevation_gain_m, elevation_loss_m, net_elevation_m,
 		created_at::text, updated_at::text
 	FROM favorite_segments
 	WHERE id = $1
@@ -117,7 +160,7 @@ func GetFavoriteSegment(ctx context.Context, conn *pgx.Conn, segmentID int64) (*
 	err := conn.QueryRow(ctx, query, segmentID).Scan(
 		&segment.ID, &segment.AthleteID, &segment.Name, &segment.Description,
 		&segment.SegmentGeog, &segment.SegmentGeogSimplified,
-		&segment.ElevationGainM,
+		&segment.ElevationGainM, &segment.ElevationLossM, &segment.NetElevationM,
 		&segment.CreatedAt, &segment.UpdatedAt,
 	)
 
@@ -137,7 +180,7 @@ func GetFavoriteSegmentByName(ctx context.Context, conn *pgx.Conn, athleteID int
 	SELECT id, athlete_id, name, description,
 		ST_AsText(segment_geog::geometry) as segment_geog,
 		ST_AsText(segment_geog_simplified::geometry) as segment_geog_simplified,
-		elevation_gain_m,
+		elevation_gain_m, elevation_loss_m, net_elevation_m,
 		created_at::text, updated_at::text
 	FROM favorite_segments
 	WHERE athlete_id = $1 AND name = $2
@@ -147,7 +190,7 @@ func GetFavoriteSegmentByName(ctx context.Context, conn *pgx.Conn, athleteID int
 	err := conn.QueryRow(ctx, query, athleteID, name).Scan(
 		&segment.ID, &segment.AthleteID, &segment.Name, &segment.Description,
 		&segment.SegmentGeog, &segment.SegmentGeogSimplified,
-		&segment.ElevationGainM,
+		&segment.ElevationGainM, &segment.ElevationLossM, &segment.NetElevationM,
 		&segment.CreatedAt, &segment.UpdatedAt,
 	)
 
@@ -167,7 +210,7 @@ func ListFavoriteSegments(ctx context.Context, conn *pgx.Conn, athleteID int64) 
 	SELECT id, athlete_id, name, description,
 		ST_AsText(segment_geog::geometry) as segment_geog,
 		ST_AsText(segment_geog_simplified::geometry) as segment_geog_simplified,
-		elevation_gain_m,
+		elevation_gain_m, elevation_loss_m, net_elevation_m,
 		created_at::text, updated_at::text
 	FROM favorite_segments
 	WHERE athlete_id = $1
@@ -186,7 +229,7 @@ func ListFavoriteSegments(ctx context.Context, conn *pgx.Conn, athleteID int64) 
 		err := rows.Scan(
 			&segment.ID, &segment.AthleteID, &segment.Name, &segment.Description,
 			&segment.SegmentGeog, &segment.SegmentGeogSimplified,
-			&segment.ElevationGainM,
+			&segment.ElevationGainM, &segment.ElevationLossM, &segment.NetElevationM,
 			&segment.CreatedAt, &segment.UpdatedAt,
 		)
 		if err != nil {
@@ -196,6 +239,129 @@ func ListFavoriteSegments(ctx context.Context, conn *pgx.Conn, athleteID int64) 
 	}
 
 	return segments, rows.Err()
+}
+
+// ListSegmentDashboardSummaries retrieves dashboard-ready summaries for all favorite segments.
+func ListSegmentDashboardSummaries(ctx context.Context, conn *pgx.Conn, athleteID int64, toleranceMeters float64) ([]SegmentDashboardSummary, error) {
+	segments, err := ListFavoriteSegments(ctx, conn, athleteID)
+	if err != nil {
+		return nil, err
+	}
+
+	summaries := make([]SegmentDashboardSummary, 0, len(segments))
+	for _, segment := range segments {
+		summary := SegmentDashboardSummary{
+			ID:            segment.ID,
+			Name:          segment.Name,
+			Description:   segment.Description,
+			CreatedAt:     segment.CreatedAt,
+			NetRiseLabel:  "n/a",
+			AscentLabel:   "n/a",
+			SlopeLabel:    "n/a",
+			Direction:     "Unknown",
+			DirectionKey:  "unknown",
+			MinTimeLabel:  "n/a",
+			MaxTimeLabel:  "n/a",
+			MinHRLabel:    "n/a",
+			MaxHRLabel:    "n/a",
+			SortBestTime:  1e12,
+			SortWorstTime: 0,
+			SortMinHR:     1e12,
+			SortMaxHR:     0,
+			SortSlope:     0,
+			SortAscent:    0,
+			SortDirection: "unknown",
+			SortName:      strings.ToLower(segment.Name),
+		}
+
+		var distanceM float64
+		if err := conn.QueryRow(ctx, `SELECT ST_Length(segment_geog) FROM favorite_segments WHERE id = $1`, segment.ID).Scan(&distanceM); err == nil {
+			summary.DistanceLabel = formatDistanceLabel(distanceM)
+		} else {
+			summary.DistanceLabel = "n/a"
+		}
+
+		if segment.ElevationGainM != nil {
+			summary.AscentLabel = fmt.Sprintf("%.0f m", *segment.ElevationGainM)
+			summary.SortAscent = *segment.ElevationGainM
+		}
+		if segment.NetElevationM != nil {
+			summary.NetRiseLabel = fmt.Sprintf("%+.0f m", *segment.NetElevationM)
+			if distanceM > 0 {
+				slope := *segment.NetElevationM / distanceM
+				summary.SortSlope = slope
+				summary.SlopeLabel = fmt.Sprintf("%+.1f%%", slope*100)
+				switch {
+				case slope > 0.02:
+					summary.Direction = "Uphill"
+					summary.DirectionKey = "uphill"
+				case slope < -0.02:
+					summary.Direction = "Downhill"
+					summary.DirectionKey = "downhill"
+				default:
+					summary.Direction = "Flat"
+					summary.DirectionKey = "flat"
+				}
+			}
+		}
+		summary.SortDirection = summary.DirectionKey
+
+		efforts, err := GetActivitiesForSegment(ctx, conn, athleteID, segment.ID, toleranceMeters, "total_time", false)
+		if err != nil {
+			log.Printf("⚠️ Failed to summarize segment %d: %v", segment.ID, err)
+			summaries = append(summaries, summary)
+			continue
+		}
+
+		summary.Attempts = len(efforts)
+		summary.SortAttempts = len(efforts)
+		for _, effort := range efforts {
+			if effort.SegmentElapsedSecs != nil && *effort.SegmentElapsedSecs > 0 {
+				seconds := *effort.SegmentElapsedSecs
+				if seconds < summary.SortBestTime {
+					summary.SortBestTime = seconds
+					summary.MinTimeLabel = formatDurationLabel(seconds)
+				}
+				if seconds > summary.SortWorstTime {
+					summary.SortWorstTime = seconds
+					summary.MaxTimeLabel = formatDurationLabel(seconds)
+				}
+			}
+			if effort.SegmentAvgHR != nil && *effort.SegmentAvgHR > 0 {
+				hr := *effort.SegmentAvgHR
+				if hr < summary.SortMinHR {
+					summary.SortMinHR = hr
+					summary.MinHRLabel = fmt.Sprintf("%.0f bpm", hr)
+				}
+				if hr > summary.SortMaxHR {
+					summary.SortMaxHR = hr
+					summary.MaxHRLabel = fmt.Sprintf("%.0f bpm", hr)
+				}
+			}
+		}
+
+		summaries = append(summaries, summary)
+	}
+
+	return summaries, nil
+}
+
+func formatDistanceLabel(meters float64) string {
+	if meters >= 1000 {
+		return fmt.Sprintf("%.2f km", meters/1000)
+	}
+	return fmt.Sprintf("%.0f m", meters)
+}
+
+func formatDurationLabel(seconds float64) string {
+	total := int(seconds + 0.5)
+	h := total / 3600
+	m := (total % 3600) / 60
+	s := total % 60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%d:%02d", m, s)
 }
 
 // UpdateFavoriteSegment updates an existing favorite segment and invalidates its cache
@@ -220,7 +386,7 @@ func UpdateFavoriteSegment(ctx context.Context, conn *pgx.Conn, segmentID int64,
 	RETURNING id, athlete_id, name, description,
 		ST_AsText(segment_geog::geometry) as segment_geog,
 		ST_AsText(segment_geog_simplified::geometry) as segment_geog_simplified,
-		elevation_gain_m,
+		elevation_gain_m, elevation_loss_m, net_elevation_m,
 		created_at::text, updated_at::text
 	`
 
@@ -233,7 +399,7 @@ func UpdateFavoriteSegment(ctx context.Context, conn *pgx.Conn, segmentID int64,
 	err := conn.QueryRow(ctx, query, segmentID, name, desc, lons, lats).Scan(
 		&segment.ID, &segment.AthleteID, &segment.Name, &segment.Description,
 		&segment.SegmentGeog, &segment.SegmentGeogSimplified,
-		&segment.ElevationGainM,
+		&segment.ElevationGainM, &segment.ElevationLossM, &segment.NetElevationM,
 		&segment.CreatedAt, &segment.UpdatedAt,
 	)
 

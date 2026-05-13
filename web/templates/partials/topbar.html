@@ -3,10 +3,11 @@
   <div class="topbar-left">
     <a class="link" href="/strava/">Activities</a>
     <a class="link" href="/segments">Segments</a>
+    {{if .Authorized}}<a class="link" href="/profile">Profile</a>{{end}}
   </div>
   <div class="topbar-right">
     {{if .Athlete}}
-      <img class="avatar" src="{{.Athlete.Profile}}" alt="avatar"/>
+      <a href="/profile"><img class="avatar" src="{{.Athlete.Profile}}" alt="avatar"/></a>
       <span class="who">{{.Athlete.FirstName}} {{.Athlete.LastName}} (ID {{.Athlete.ID}})</span>
     {{end}}
     {{if .ShowLoginCTA}}
@@ -17,4 +18,3 @@
   </div>
 </div>
 {{end}}
-

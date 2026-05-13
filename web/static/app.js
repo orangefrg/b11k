@@ -1217,12 +1217,68 @@
   };
 
   function onSegmentsPage() {
+    const dashboard = document.getElementById('segments-dashboard');
+    const filterInput = document.getElementById('segments-filter');
+    const directionSelect = document.getElementById('segments-direction');
+    const sortSelect = document.getElementById('segments-sort');
+    let segmentCards = dashboard ? Array.from(dashboard.querySelectorAll('.segment-card[data-segment-id]')) : [];
     const deleteButtons = document.querySelectorAll('.delete-segment-btn');
     const deleteModal = document.getElementById('delete-modal');
     const deleteCancelBtn = document.getElementById('delete-cancel-btn');
     const deleteConfirmBtn = document.getElementById('delete-confirm-btn');
     const deleteSegmentName = document.getElementById('delete-segment-name');
     let segmentToDelete = null;
+
+    const asNumber = (card, key) => {
+      const value = Number(card.dataset[key]);
+      return Number.isFinite(value) ? value : 0;
+    };
+
+    const applyDashboardControls = () => {
+      if (!dashboard) return;
+      const query = (filterInput?.value || '').trim().toLowerCase();
+      const direction = directionSelect?.value || 'all';
+      const sortBy = sortSelect?.value || 'name';
+
+      const visible = segmentCards.filter(card => {
+        const matchesText = !query || (card.dataset.name || '').includes(query);
+        const matchesDirection = direction === 'all' || card.dataset.direction === direction;
+        card.hidden = !(matchesText && matchesDirection);
+        return !card.hidden;
+      });
+
+      visible.sort((a, b) => {
+        switch (sortBy) {
+        case 'attempts':
+          return asNumber(b, 'attempts') - asNumber(a, 'attempts');
+        case 'best':
+          return asNumber(a, 'best') - asNumber(b, 'best');
+        case 'worst':
+          return asNumber(b, 'worst') - asNumber(a, 'worst');
+        case 'minhr':
+          return asNumber(a, 'minhr') - asNumber(b, 'minhr');
+        case 'maxhr':
+          return asNumber(b, 'maxhr') - asNumber(a, 'maxhr');
+        case 'slope':
+          return asNumber(b, 'slope') - asNumber(a, 'slope');
+        case 'ascent':
+          return asNumber(b, 'ascent') - asNumber(a, 'ascent');
+        case 'direction':
+          return (a.dataset.direction || '').localeCompare(b.dataset.direction || '') || (a.dataset.name || '').localeCompare(b.dataset.name || '');
+        default:
+          return (a.dataset.name || '').localeCompare(b.dataset.name || '');
+        }
+      });
+
+      visible.forEach(card => dashboard.appendChild(card));
+    };
+
+    if (segmentCards.length > 0) {
+      filterInput?.addEventListener('input', applyDashboardControls);
+      directionSelect?.addEventListener('change', applyDashboardControls);
+      sortSelect?.addEventListener('change', applyDashboardControls);
+      applyDashboardControls();
+    }
 
     if (deleteButtons.length > 0 && deleteModal && deleteCancelBtn && deleteConfirmBtn) {
       deleteButtons.forEach(btn => {
@@ -1258,16 +1314,17 @@
           if (segmentItem) {
             segmentItem.remove();
           }
+          segmentCards = segmentCards.filter(card => card.getAttribute('data-segment-id') !== segmentToDelete);
 
           deleteModal.style.display = 'none';
           segmentToDelete = null;
 
           // If no segments left, show message
-          const remainingSegments = document.querySelectorAll('.item[data-segment-id]');
+          const remainingSegments = document.querySelectorAll('.segment-card[data-segment-id]');
           if (remainingSegments.length === 0) {
-            const list = document.querySelector('.list');
+            const list = document.querySelector('#segments-dashboard');
             if (list) {
-              list.innerHTML = '<div>No segments found. Create segments from activity pages.</div>';
+              list.innerHTML = '<div class="item">No segments found. Create segments from activity pages.</div>';
             }
           }
         } catch (error) {
@@ -1425,6 +1482,8 @@
     const activitiesLoading = document.getElementById('activities-loading');
     let selectedActivityID = null;
     let currentActivityFeatures = null; // Store features for color metric changes
+    const selectedEfforts = new Map();
+    const compareColors = ['#70d6ff', '#f5d76e', '#c084fc'];
 
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
       '&': '&amp;',
@@ -1517,6 +1576,19 @@
       `;
     };
 
+    const renderZoneMini = zones => {
+      if (!Array.isArray(zones) || zones.length === 0) return '<span class="muted">n/a</span>';
+      return `
+        <div class="zone-mini">
+          ${zones.map(zone => `
+            <span title="${escapeHtml(zone.label || `Z${zone.zone}`)} ${Number(zone.percentage || 0).toFixed(1)}%">
+              <i style="height:${Math.max(2, Number(zone.percentage || 0))}%"></i>
+            </span>
+          `).join('')}
+        </div>
+      `;
+    };
+
     function loadActivities(forceRefresh = false) {
       const tolerance = parseFloat(toleranceInput.value) || 15;
       const sortBy = sortSelect.value || 'distance';
@@ -1546,10 +1618,12 @@
               <table class="effort-table">
                 <thead>
                   <tr>
+                    <th>Compare</th>
                     <th>Effort</th>
                     <th>Time</th>
                     <th>HR</th>
                     <th>Speed</th>
+                    <th>HR zones</th>
                     <th>Δ best</th>
                     <th>Δ prev</th>
                     <th>Match</th>
@@ -1562,7 +1636,8 @@
                     const deltaBestClass = activity.deltaBest === 0 ? 'delta-good' : 'delta-slow';
                     const deltaPrevClass = activity.deltaPrevious !== null && activity.deltaPrevious <= 0 ? 'delta-good' : 'delta-slow';
                     return `
-                      <tr class="effort-row ${selectedActivityID === activity.id ? 'selected' : ''}" data-activity-id="${activity.id}">
+                      <tr class="effort-row ${selectedEfforts.has(activity.id) ? 'selected' : ''}" data-activity-id="${activity.id}">
+                        <td><button type="button" class="compare-toggle" data-activity-id="${activity.id}">${selectedEfforts.has(activity.id) ? 'On' : 'Add'}</button></td>
                         <td>
                           <span class="effort-name">${escapeHtml(activity.name || 'Activity')}</span>
                           <span class="meta">${formatEffortDate(activity)} · <a class="link" href="/activity/${activity.id}">Open</a></span>
@@ -1570,6 +1645,7 @@
                         <td>${formatDuration(activity.effortSeconds)}</td>
                         <td>${hr > 0 ? `${Math.round(hr)}` : 'n/a'}</td>
                         <td>${speed > 0 ? `${(speed * 3.6).toFixed(1)}` : 'n/a'}</td>
+                        <td>${renderZoneMini(activity.segment_hr_zones)}</td>
                         <td class="${deltaBestClass}">${activity.deltaBest === null ? 'n/a' : formatDelta(activity.deltaBest)}</td>
                         <td class="${deltaPrevClass}">${activity.deltaPrevious === null ? 'n/a' : formatDelta(activity.deltaPrevious)}</td>
                         <td>${activity.overlap_percentage ? `${activity.overlap_percentage.toFixed(0)}%` : 'n/a'}</td>
@@ -1586,18 +1662,18 @@
             row.addEventListener('click', (e) => {
               // Don't navigate if clicking on the "View Full" link
               if (e.target.tagName === 'A') return;
+              if (e.target.closest('button')) return;
               
               const activityID = parseInt(row.getAttribute('data-activity-id'));
-              selectedActivityID = activityID;
-              
-              // Update selected style
-              activitiesList.querySelectorAll('.effort-row').forEach(i => i.classList.remove('selected'));
-              row.classList.add('selected');
-
-              // Load and display activity points with segment portion highlighted
-              // Preserve color metric selection
-              const currentColorMetric = document.getElementById('color-metric')?.value || 'none';
-              loadActivityPoints(activityID, segmentID, tolerance, currentColorMetric);
+              const activity = efforts.find(item => item.id === activityID);
+              toggleEffortComparison(activity, tolerance);
+            });
+          });
+          activitiesList.querySelectorAll('.compare-toggle[data-activity-id]').forEach(btn => {
+            btn.addEventListener('click', () => {
+              const activityID = parseInt(btn.getAttribute('data-activity-id'));
+              const activity = efforts.find(item => item.id === activityID);
+              toggleEffortComparison(activity, tolerance);
             });
           });
         })
@@ -1606,6 +1682,123 @@
           activitiesSection.style.display = 'block';
           activitiesList.innerHTML = `<div class="delta-slow">Error loading efforts: ${escapeHtml(err.message)}</div>`;
         });
+    }
+
+    function repaintEffortSelection() {
+      activitiesList.querySelectorAll('.effort-row[data-activity-id]').forEach(row => {
+        const activityID = parseInt(row.getAttribute('data-activity-id'));
+        const index = Array.from(selectedEfforts.keys()).indexOf(activityID);
+        row.classList.toggle('selected', index >= 0);
+        row.style.setProperty('--effort-color', index >= 0 ? compareColors[index] : 'transparent');
+      });
+      activitiesList.querySelectorAll('.compare-toggle[data-activity-id]').forEach(btn => {
+        const activityID = parseInt(btn.getAttribute('data-activity-id'));
+        btn.textContent = selectedEfforts.has(activityID) ? 'On' : 'Add';
+      });
+    }
+
+    function toggleEffortComparison(activity, tolerance) {
+      if (!activity) return;
+      if (selectedEfforts.has(activity.id)) {
+        selectedEfforts.delete(activity.id);
+      } else {
+        if (selectedEfforts.size >= 3) {
+          alert('Select up to three efforts to compare.');
+          return;
+        }
+        selectedEfforts.set(activity.id, activity);
+      }
+
+      selectedActivityID = selectedEfforts.size > 0 ? Array.from(selectedEfforts.keys())[selectedEfforts.size - 1] : null;
+      repaintEffortSelection();
+      renderSelectedEffortsOnMap(tolerance);
+      updateSegmentComparisonGraph();
+    }
+
+    function clearComparisonMapLayers() {
+      for (let i = 0; i < 3; i++) {
+        const lineLayer = `comparison-effort-line-${i}`;
+        const pointLayer = `comparison-effort-points-${i}`;
+        const lineSource = `comparison-effort-${i}`;
+        const pointSource = `comparison-effort-points-${i}`;
+        if (map.getLayer(pointLayer)) map.removeLayer(pointLayer);
+        if (map.getSource(pointSource)) map.removeSource(pointSource);
+        if (map.getLayer(lineLayer)) map.removeLayer(lineLayer);
+        if (map.getSource(lineSource)) map.removeSource(lineSource);
+      }
+    }
+
+    function fetchSegmentEffort(activityID, segID, tolerance) {
+      return Promise.all([
+        fetch(`/api/activities/${activityID}/points`).then(r => r.json()),
+        fetch(`/api/segments/${segID}/activity/${activityID}/indices?tolerance=${tolerance}`).then(r => r.json())
+      ]).then(([points, indices]) => {
+        if (!Array.isArray(points) || points.length === 0) return null;
+        const startIdx = indices.start_index || 0;
+        const endIdx = indices.end_index || points.length - 1;
+        const segmentPoints = points.slice(startIdx, endIdx + 1);
+        if (segmentPoints.length === 0) return null;
+
+        const lineCoords = segmentPoints.map(p => [p.lng, p.lat]);
+        const features = segmentPoints.map((p, idx) => ({
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+          properties: { idx: startIdx + idx, time: p.time, speed: p.speed, cadence: p.cadence, heartrate: p.heartrate, alt: p.altitude, grade: p.grade, moving: p.moving }
+        }));
+        const lineFeature = {
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: lineCoords },
+          properties: { activity_id: activityID }
+        };
+        return { activityID, points: segmentPoints, features, lineFeature };
+      });
+    }
+
+    function renderSelectedEffortsOnMap(tolerance) {
+      clearComparisonMapLayers();
+      const selections = Array.from(selectedEfforts.keys());
+      if (selections.length === 0) {
+        currentActivityFeatures = null;
+        return;
+      }
+
+      Promise.all(selections.map(activityID => fetchSegmentEffort(activityID, segmentID, tolerance)))
+        .then(efforts => {
+          efforts.filter(Boolean).forEach((effort, index) => {
+            const color = compareColors[index];
+            const lineSource = `comparison-effort-${index}`;
+            const lineLayer = `comparison-effort-line-${index}`;
+            const pointSource = `comparison-effort-points-${index}`;
+            const pointLayer = `comparison-effort-points-${index}`;
+
+            map.addSource(lineSource, {
+              type: 'geojson',
+              data: { type: 'FeatureCollection', features: [effort.lineFeature] }
+            });
+            map.addLayer({
+              id: lineLayer,
+              type: 'line',
+              source: lineSource,
+              paint: { 'line-color': color, 'line-width': 4 + index, 'line-opacity': index === efforts.length - 1 ? 0.95 : 0.68 }
+            });
+
+            map.addSource(pointSource, {
+              type: 'geojson',
+              data: { type: 'FeatureCollection', features: effort.features }
+            });
+            map.addLayer({
+              id: pointLayer,
+              type: 'circle',
+              source: pointSource,
+              paint: { 'circle-radius': 3, 'circle-color': color, 'circle-opacity': 0.2 }
+            });
+
+            if (index === efforts.length - 1) {
+              currentActivityFeatures = effort.features;
+            }
+          });
+        })
+        .catch(err => console.error('Failed to render comparison efforts:', err));
     }
 
     function loadActivityPoints(activityID, segID, tolerance, preserveColorMetric = null) {
@@ -1865,6 +2058,169 @@
       
       return distances; // Returns distances in meters
     };
+
+    function metricLabel(metric) {
+      if (metric === 'heartrate') return 'HR';
+      if (metric === 'height') return 'Elevation';
+      return metric.charAt(0).toUpperCase() + metric.slice(1);
+    }
+
+    function convertGraphValue(value, metric) {
+      return metric === 'speed' ? value * 3.6 : value;
+    }
+
+    function updateSegmentComparisonGraph() {
+      if (!metric1Select || !metric2Select || !graphCanvas) return;
+      const selected = Array.from(selectedEfforts.values());
+      if (selected.length === 0) {
+        selectedActivityID = null;
+        if (segmentChartInstance) {
+          segmentChartInstance.destroy();
+          segmentChartInstance = null;
+        }
+        const placeholder = document.getElementById('graph-placeholder');
+        if (graphContainer) graphContainer.classList.add('graph-empty');
+        if (graphCanvas) graphCanvas.style.display = 'none';
+        if (placeholder) placeholder.style.display = 'block';
+        return;
+      }
+
+      const metric1 = metric1Select.value;
+      const metric2 = metric2Select.value;
+      const xAxisType = xAxisSelect ? xAxisSelect.value : 'time';
+      const metrics = [metric1, metric2].filter(Boolean);
+      const placeholder = document.getElementById('graph-placeholder');
+
+      if (metrics.length === 0) {
+        if (segmentChartInstance) {
+          segmentChartInstance.destroy();
+          segmentChartInstance = null;
+        }
+        if (graphContainer) graphContainer.classList.add('graph-empty');
+        if (graphCanvas) graphCanvas.style.display = 'none';
+        if (placeholder) placeholder.style.display = 'block';
+        return;
+      }
+
+      if (graphContainer) graphContainer.classList.remove('graph-empty');
+      if (placeholder) placeholder.style.display = 'none';
+      graphCanvas.style.display = 'block';
+      graphCanvas.style.width = '100%';
+      graphCanvas.style.height = '250px';
+
+      Promise.all(selected.map((activity, effortIndex) => {
+        const includeZones = metrics.includes('heartrate');
+        const url = `/api/segments/${segmentID}/graph?metrics=${metrics.join(',')}&activity_id=${activity.id}&include_zones=${includeZones}`;
+        return fetch(url)
+          .then(r => {
+            if (!r.ok) throw new Error(`Graph fetch failed for ${activity.name}`);
+            return r.json();
+          })
+          .then(data => ({ activity, effortIndex, data }));
+      })).then(results => {
+        const datasets = [];
+
+        results.forEach(({ activity, effortIndex, data }) => {
+          metrics.forEach((metric, metricIndex) => {
+            const metricData = data[metric];
+            if (!Array.isArray(metricData) || metricData.length === 0) return;
+            const firstTime = new Date(metricData[0].time).getTime();
+            const firstDistance = metricData[0].distance || 0;
+            const baseColor = compareColors[effortIndex];
+            datasets.push({
+              label: `${activity.name || 'Effort'} · ${metricLabel(metric)}`,
+              data: metricData.map(point => {
+                let x;
+                if (xAxisType === 'distance' && point.distance != null) {
+                  x = Math.max(0, (point.distance - firstDistance) / 1000);
+                } else {
+                  x = Math.max(0, (new Date(point.time).getTime() - firstTime) / 1000);
+                }
+                return {
+                  x,
+                  y: convertGraphValue(point.value, metric),
+                  time: point.time
+                };
+              }),
+              borderColor: baseColor,
+              backgroundColor: 'transparent',
+              borderWidth: metricIndex === 0 ? 2.6 : 1.8,
+              borderDash: metricIndex === 0 ? [] : [5, 5],
+              pointRadius: 0,
+              pointHoverRadius: 4,
+              tension: 0.18,
+              yAxisID: metricIndex === 0 ? 'y' : 'y1'
+            });
+          });
+        });
+
+        if (segmentChartInstance) {
+          segmentChartInstance.destroy();
+          segmentChartInstance = null;
+        }
+
+        const ctx = graphCanvas.getContext('2d');
+        segmentChartInstance = new Chart(ctx, {
+          type: 'line',
+          data: { datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'nearest' },
+            plugins: {
+              legend: {
+                display: true,
+                position: 'top',
+                labels: { color: '#e0e0e0', boxWidth: 28 }
+              },
+              tooltip: {
+                callbacks: {
+                  title: context => {
+                    const x = context[0].parsed.x;
+                    return xAxisType === 'distance' ? `${x.toFixed(2)} km` : formatDuration(x);
+                  },
+                  label: context => {
+                    const label = context.dataset.label || '';
+                    const value = context.parsed.y;
+                    const unit = label.includes('Speed') ? ' km/h' : label.includes('HR') ? ' bpm' : label.includes('Cadence') ? ' rpm' : label.includes('Elevation') ? ' m' : '';
+                    return `${label}: ${value.toFixed(1)}${unit}`;
+                  }
+                }
+              }
+            },
+            scales: {
+              x: {
+                type: 'linear',
+                title: {
+                  display: true,
+                  text: xAxisType === 'distance' ? 'Segment distance (km)' : 'Segment elapsed time',
+                  color: '#e0e0e0'
+                },
+                ticks: {
+                  color: '#e0e0e0',
+                  callback: value => xAxisType === 'distance' ? `${Number(value).toFixed(1)} km` : formatDuration(value)
+                },
+                grid: { color: '#333' }
+              },
+              y: {
+                position: 'left',
+                ticks: { color: '#e0e0e0' },
+                grid: { color: '#333' }
+              },
+              y1: {
+                type: 'linear',
+                display: metrics.length > 1,
+                position: 'right',
+                ticks: { color: '#e0e0e0' },
+                grid: { drawOnChartArea: false }
+              }
+            }
+          }
+        });
+      }).catch(error => {
+        console.error('Error loading comparison graph:', error);
+      });
+    }
 
     function updateSegmentGraph(activityID, segID) {
       if (!metric1Select || !metric2Select || !graphCanvas || !activityID) return;
@@ -2207,19 +2563,19 @@
 
     if (metric1Select && metric2Select) {
       metric1Select.addEventListener('change', () => {
-        if (selectedActivityID) {
-          updateSegmentGraph(selectedActivityID, segmentID);
+        if (selectedEfforts.size > 0) {
+          updateSegmentComparisonGraph();
         }
       });
       metric2Select.addEventListener('change', () => {
-        if (selectedActivityID) {
-          updateSegmentGraph(selectedActivityID, segmentID);
+        if (selectedEfforts.size > 0) {
+          updateSegmentComparisonGraph();
         }
       });
       if (xAxisSelect) {
         xAxisSelect.addEventListener('change', () => {
-          if (selectedActivityID) {
-            updateSegmentGraph(selectedActivityID, segmentID);
+          if (selectedEfforts.size > 0) {
+            updateSegmentComparisonGraph();
           }
         });
       }

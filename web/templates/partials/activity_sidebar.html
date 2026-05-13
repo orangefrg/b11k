@@ -28,6 +28,11 @@
   </div>
   <div class="detail-list">
     <div class="stat">Start: <span class="muted">{{.Activity.StartDateTime}}</span></div>
+    {{if .Activity.GearName}}
+    <div class="stat">Bike: <span class="muted">{{.Activity.GearName}}</span></div>
+    {{else if .Activity.GearID}}
+    <div class="stat">Bike: <span class="muted">{{.Activity.GearID}}</span></div>
+    {{end}}
     <div class="stat">Max speed: <span class="muted">{{printf "%.1f" (mul .Activity.MaxSpeed 3.6)}} km/h</span></div>
     <div class="stat">Avg cadence: <span class="muted">{{printf "%.0f" .Activity.AverageCadence}} rpm</span></div>
     <div class="stat">Max HR: <span class="muted">{{printf "%.0f" .Activity.MaxHeartrate}} bpm</span></div>
@@ -35,6 +40,18 @@
   </div>
   {{if or .Activity.LocationCity .Activity.LocationCountry}}
   <div class="stat">Location: <span class="muted">{{if .Activity.LocationCity}}{{.Activity.LocationCity}}{{end}}{{if and .Activity.LocationCity .Activity.LocationCountry}}, {{end}}{{.Activity.LocationCountry}}</span></div>
+  {{end}}
+  {{if .ActivityHRZones}}
+  <div class="hr-zone-panel">
+    <h3>HR Zones</h3>
+    {{range .ActivityHRZones}}
+    <div class="zone-row">
+      <span>{{.Label}}</span>
+      <div class="zone-bar"><span style="width: {{printf "%.1f" .Percentage}}%;"></span></div>
+      <strong>{{printf "%.0f" .Percentage}}%</strong>
+    </div>
+    {{end}}
+  </div>
   {{end}}
 </div>
 {{end}}
