@@ -454,20 +454,20 @@ func calculateHRZone(hr int, zones *strava.HeartRateZones) int {
 
 // PointSample represents a single point sample from an activity
 type PointSample struct {
-	ID                int64     `json:"id"`
-	ActivityID        int64     `json:"activity_id"`
-	AthleteID         int64     `json:"athlete_id"`
-	PointIndex        int       `json:"point_index"`
-	Time              time.Time `json:"time"`
-	Lat               float64   `json:"lat"`
-	Lng               float64   `json:"lng"`
-	Altitude          *float64  `json:"altitude,omitempty"`
-	Heartrate         *int      `json:"heartrate,omitempty"`
-	Speed             *float64  `json:"speed,omitempty"`
-	Watts             *int      `json:"watts,omitempty"`
-	Cadence           *int      `json:"cadence,omitempty"`
-	Grade             *float64  `json:"grade,omitempty"`
-	Moving            *bool     `json:"moving,omitempty"`
+	ID                 int64     `json:"id"`
+	ActivityID         int64     `json:"activity_id"`
+	AthleteID          int64     `json:"athlete_id"`
+	PointIndex         int       `json:"point_index"`
+	Time               time.Time `json:"time"`
+	Lat                float64   `json:"lat"`
+	Lng                float64   `json:"lng"`
+	Altitude           *float64  `json:"altitude,omitempty"`
+	Heartrate          *int      `json:"heartrate,omitempty"`
+	Speed              *float64  `json:"speed,omitempty"`
+	Watts              *int      `json:"watts,omitempty"`
+	Cadence            *int      `json:"cadence,omitempty"`
+	Grade              *float64  `json:"grade,omitempty"`
+	Moving             *bool     `json:"moving,omitempty"`
 	CumulativeDistance *float64  `json:"cumulative_distance,omitempty"`
 }
 
@@ -659,6 +659,7 @@ type ActivityWithMatch struct {
 	SegmentAvgSpeed    *float64 `json:"segment_avg_speed,omitempty"`      // Segment-specific avg speed
 	SegmentDistance    *float64 `json:"segment_distance,omitempty"`       // Segment-specific distance
 	SegmentElevation   *float64 `json:"segment_elevation_gain,omitempty"` // Segment-specific elevation gain
+	SegmentElapsedSecs *float64 `json:"segment_elapsed_seconds,omitempty"`
 }
 
 // GetActivitiesForSegment retrieves activities matching a segment, using cache when available
@@ -704,7 +705,7 @@ func getCachedSegmentMatches(ctx context.Context, conn *pgx.Conn, segmentID int6
 	query := `
 	SELECT activity_id, segment_id, min_distance_m, overlap_length_m, overlap_percentage
 	FROM segment_activity_matches
-	WHERE segment_id = $1 AND tolerance_meters = $2
+	WHERE segment_id = $1 AND tolerance_meters = $2 AND direction_checked = TRUE
 	ORDER BY min_distance_m, overlap_percentage DESC
 	`
 
@@ -750,15 +751,6 @@ func getActivitiesWithMatchesWithTolerance(ctx context.Context, conn *pgx.Conn, 
 		return nil, fmt.Errorf("failed to get activities: %w", err)
 	}
 
-	// Load segment-specific metrics from cache
-	cachedMetricsMap := make(map[int64]*SegmentActivityCacheEntry)
-	for _, activityID := range activityIDs {
-		cached, err := GetCachedSegmentActivityMetrics(ctx, conn, segmentID, activityID, toleranceMeters)
-		if err == nil && cached != nil {
-			cachedMetricsMap[activityID] = cached
-		}
-	}
-
 	// Combine with match metadata and segment metrics
 	result := make([]ActivityWithMatch, 0, len(activities))
 	for _, activity := range activities {
@@ -775,13 +767,18 @@ func getActivitiesWithMatchesWithTolerance(ctx context.Context, conn *pgx.Conn, 
 			StartDateFormatted: activity.StartDateTime.Format(time.RFC3339),
 		}
 
-		// Add segment-specific metrics if available
-		if cached, ok := cachedMetricsMap[activity.ID]; ok {
-			awm.SegmentAvgHR = cached.AvgHR
-			awm.SegmentAvgSpeed = cached.AvgSpeed
-			awm.SegmentDistance = cached.DistanceM
-			awm.SegmentElevation = cached.ElevationGainM
+		effort, err := ensureSegmentActivityMetrics(ctx, conn, athleteID, segmentID, activity.ID, toleranceMeters)
+		if err != nil {
+			log.Printf("⚠️ Failed to load segment metrics for activity %d: %v", activity.ID, err)
 		}
+		if effort == nil {
+			continue
+		}
+		awm.SegmentAvgHR = effort.AvgHR
+		awm.SegmentAvgSpeed = effort.AvgSpeed
+		awm.SegmentDistance = effort.DistanceM
+		awm.SegmentElevation = effort.ElevationGainM
+		awm.SegmentElapsedSecs = effort.ElapsedSeconds
 
 		result = append(result, awm)
 	}
@@ -790,6 +787,55 @@ func getActivitiesWithMatchesWithTolerance(ctx context.Context, conn *pgx.Conn, 
 	sortActivitiesWithMatches(result, sortBy)
 
 	return result, nil
+}
+
+func ensureSegmentActivityMetrics(ctx context.Context, conn *pgx.Conn, athleteID, segmentID, activityID int64, toleranceMeters float64) (*SegmentActivityCacheEntry, error) {
+	cached, err := GetCachedSegmentActivityMetrics(ctx, conn, segmentID, activityID, toleranceMeters)
+	if err != nil {
+		return nil, err
+	}
+	if cached != nil && cached.StartIndex != nil && cached.EndIndex != nil &&
+		cached.AvgHR != nil && cached.AvgSpeed != nil && cached.DistanceM != nil &&
+		cached.ElevationGainM != nil && cached.ElapsedSeconds != nil {
+		return cached, nil
+	}
+
+	var startIndex, endIndex int
+	if err := conn.QueryRow(ctx,
+		`SELECT * FROM find_segment_point_indices($1, $2, $3, $4)`,
+		segmentID, activityID, athleteID, toleranceMeters,
+	).Scan(&startIndex, &endIndex); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds float64
+	if err := conn.QueryRow(ctx,
+		`SELECT * FROM get_activity_segment_metrics($1, $2, $3, $4)`,
+		segmentID, activityID, athleteID, toleranceMeters,
+	).Scan(&avgHR, &avgSpeed, &distanceM, &elevationGainM, &elapsedSeconds); err != nil {
+		return nil, err
+	}
+
+	if err := CacheSegmentActivityMetrics(ctx, conn, segmentID, activityID, toleranceMeters, startIndex, endIndex, avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds); err != nil {
+		return nil, err
+	}
+
+	return &SegmentActivityCacheEntry{
+		SegmentID:        segmentID,
+		ActivityID:       activityID,
+		ToleranceMeters:  toleranceMeters,
+		StartIndex:       &startIndex,
+		EndIndex:         &endIndex,
+		AvgHR:            &avgHR,
+		AvgSpeed:         &avgSpeed,
+		DistanceM:        &distanceM,
+		ElevationGainM:   &elevationGainM,
+		ElapsedSeconds:   &elapsedSeconds,
+		DirectionChecked: true,
+	}, nil
 }
 
 // sortActivitiesWithMatches sorts activities by the specified criteria
@@ -832,7 +878,15 @@ func sortActivitiesWithMatches(activities []ActivityWithMatch, sortBy string) {
 		})
 	case "total_time":
 		sort.Slice(activities, func(i, j int) bool {
-			return activities[i].ElapsedTime > activities[j].ElapsedTime // Descending
+			timeI := activities[i].ElapsedTime
+			if activities[i].SegmentElapsedSecs != nil {
+				timeI = *activities[i].SegmentElapsedSecs
+			}
+			timeJ := activities[j].ElapsedTime
+			if activities[j].SegmentElapsedSecs != nil {
+				timeJ = *activities[j].SegmentElapsedSecs
+			}
+			return timeI < timeJ
 		})
 	case "date":
 		sort.Slice(activities, func(i, j int) bool {

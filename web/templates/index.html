@@ -16,7 +16,7 @@
 
     <form id="sync-form" {{if not .Authorized}}style="display:none"{{end}} class="form">
       <label>Start date: <input type="date" name="start" /></label>
-      <label style="margin-left:12px">End date: <input type="date" name="end" /></label>
+      <label>End date: <input type="date" name="end" /></label>
       <button type="submit">Sync from Strava</button>
     </form>
     {{if not .Authorized}}
@@ -82,4 +82,3 @@
 </body>
 </html>
 {{end}}
-

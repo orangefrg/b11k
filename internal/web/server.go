@@ -22,18 +22,20 @@ import (
 )
 
 type Config struct {
-	StravaClientID     string
-	StravaClientSecret string
-	StravaRedirectURI  string
-	MapboxToken        string
-	PGIP               string
-	PGPort             string
-	PGUser             string
-	PGPassword         string
-	PGDatabase         string
-	WebHost            string
-	WebPort            string
-	WebProtocol        string
+	StravaClientID      string
+	StravaClientSecret  string
+	StravaRedirectURI   string
+	MapboxToken         string
+	PGIP                string
+	PGPort              string
+	PGUser              string
+	PGPassword          string
+	PGDatabase          string
+	WebHost             string
+	WebPort             string
+	WebProtocol         string
+	DevReloadTemplates  bool
+	MobileActivityOrder string
 }
 
 type server struct {
@@ -61,8 +63,43 @@ func RunServer(ctx context.Context, cfg Config) {
 		log.Fatalf("Error validating/migrating database schema: %v", err)
 	}
 
-	// Parse templates from disk
-	tmpl, err := template.New("").Funcs(template.FuncMap{
+	tmpl, err := parseTemplates()
+	if err != nil {
+		log.Fatalf("parse templates: %v", err)
+	}
+
+	s := &server{ctx: ctx, cfg: cfg, conn: conn, tmpl: tmpl}
+	if cfg.DevReloadTemplates {
+		log.Printf("🔁 Dev template reload enabled")
+	}
+
+	// Routes
+	http.HandleFunc("/", s.handleIndex)
+	http.HandleFunc("/strava/", s.handleStravaHome)
+	http.HandleFunc("/strava/login", s.handleStravaLogin)
+	http.HandleFunc("/activity/", s.handleActivity)
+	http.HandleFunc("/api/activities", s.handleActivitiesAPI)
+	http.HandleFunc("/api/activities/", s.handleActivityPointsAPI)
+	http.HandleFunc("/strava/callback", s.handleStravaCallback)
+	http.HandleFunc("/strava/logout", s.handleStravaLogout)
+	http.HandleFunc("/api/hrzones", s.handleHRZones)
+	http.HandleFunc("/strava/sync", s.handleStravaSyncSSE)
+	http.HandleFunc("/api/segments", s.handleSegmentsAPI)
+	http.HandleFunc("/api/segments/", s.handleSegmentAPI)
+	http.HandleFunc("/segments", s.handleSegmentsPage)
+	http.HandleFunc("/segment/", s.handleSegmentPage)
+
+	// static
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(filepath.FromSlash("web/static")))))
+
+	addr := ":" + strings.TrimPrefix(cfg.WebPort, ":")
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		log.Fatalf("server error: %v", err)
+	}
+}
+
+func parseTemplates() (*template.Template, error) {
+	return template.New("").Funcs(template.FuncMap{
 		"mul":  func(a, b float64) float64 { return a * b },
 		"kcal": func(kj float64) float64 { return kj * 0.239006 },
 		"add":  func(a, b int) int { return a + b },
@@ -88,38 +125,23 @@ func RunServer(ctx context.Context, cfg Config) {
 		filepath.FromSlash("web/templates/partials/topbar.html"),
 		filepath.FromSlash("web/templates/partials/map.html"),
 		filepath.FromSlash("web/templates/partials/graph.html"),
+		filepath.FromSlash("web/templates/partials/color_controls.html"),
 		filepath.FromSlash("web/templates/partials/activity_sidebar.html"),
 		filepath.FromSlash("web/templates/partials/segment_sidebar.html"),
 	)
-	if err != nil {
-		log.Fatalf("parse templates: %v", err)
+}
+
+func (s *server) executeTemplate(w http.ResponseWriter, name string, data interface{}) error {
+	tmpl := s.tmpl
+	if s.cfg.DevReloadTemplates {
+		reloaded, err := parseTemplates()
+		if err != nil {
+			log.Printf("template reload error: %v", err)
+			return err
+		}
+		tmpl = reloaded
 	}
-
-	s := &server{ctx: ctx, cfg: cfg, conn: conn, tmpl: tmpl}
-
-	// Routes
-	http.HandleFunc("/", s.handleIndex)
-	http.HandleFunc("/strava/", s.handleStravaHome)
-	http.HandleFunc("/strava/login", s.handleStravaLogin)
-	http.HandleFunc("/activity/", s.handleActivity)
-	http.HandleFunc("/api/activities", s.handleActivitiesAPI)
-	http.HandleFunc("/api/activities/", s.handleActivityPointsAPI)
-	http.HandleFunc("/strava/callback", s.handleStravaCallback)
-	http.HandleFunc("/strava/logout", s.handleStravaLogout)
-	http.HandleFunc("/api/hrzones", s.handleHRZones)
-	http.HandleFunc("/strava/sync", s.handleStravaSyncSSE)
-	http.HandleFunc("/api/segments", s.handleSegmentsAPI)
-	http.HandleFunc("/api/segments/", s.handleSegmentAPI)
-	http.HandleFunc("/segments", s.handleSegmentsPage)
-	http.HandleFunc("/segment/", s.handleSegmentPage)
-
-	// static
-	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(filepath.FromSlash("web/static")))))
-
-	addr := ":" + strings.TrimPrefix(cfg.WebPort, ":")
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("server error: %v", err)
-	}
+	return tmpl.ExecuteTemplate(w, name, data)
 }
 
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -224,7 +246,7 @@ func (s *server) renderActivitiesPageWithReq(w http.ResponseWriter, r *http.Requ
 		HasPrev:      page > 1,
 		PerPage:      perPage,
 	}
-	if err := s.tmpl.ExecuteTemplate(w, "index.html", data); err != nil {
+	if err := s.executeTemplate(w, "index.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -271,19 +293,21 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := struct {
-		Activity     strava.ActivitySummary
-		MapboxToken  string
-		Athlete      *strava.Athlete
-		ShowLoginCTA bool
-		Authorized   bool
+		Activity            strava.ActivitySummary
+		MapboxToken         string
+		Athlete             *strava.Athlete
+		ShowLoginCTA        bool
+		Authorized          bool
+		MobileActivityOrder string
 	}{
-		Activity:     *activity,
-		MapboxToken:  s.cfg.MapboxToken,
-		Athlete:      s.user,
-		ShowLoginCTA: s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:   s.token != "",
+		Activity:            *activity,
+		MapboxToken:         s.cfg.MapboxToken,
+		Athlete:             s.user,
+		ShowLoginCTA:        s.token == "" && s.cfg.StravaClientID != "",
+		Authorized:          s.token != "",
+		MobileActivityOrder: s.cfg.MobileActivityOrder,
 	}
-	if err := s.tmpl.ExecuteTemplate(w, "activity.html", data); err != nil {
+	if err := s.executeTemplate(w, "activity.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -510,11 +534,11 @@ func (s *server) handleStravaCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
-	
+
 	// Log the callback for debugging
 	log.Printf("🔐 Strava callback received from: %s", r.RemoteAddr)
 	log.Printf("📋 Using redirect URI: %s", s.cfg.StravaRedirectURI)
-	
+
 	authCfg := strava.NewStravaAuthConfig(s.cfg.StravaClientID, s.cfg.StravaClientSecret, s.cfg.StravaRedirectURI)
 	tok, err := strava.ExchangeCodeForToken(*authCfg, code)
 	if err != nil {
@@ -717,8 +741,11 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			s.connMu.Lock()
 			graphData, err := pggeo.GetGraphDataForSegmentInActivity(s.ctx, s.conn, s.user.ID, activityID, segmentID, metrics, includeZones, hrZones)
+			s.connMu.Unlock()
 			if err != nil {
+				log.Printf("❌ Failed to load segment graph data for segment %d activity %d: %v", segmentID, activityID, err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -813,11 +840,16 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 				if cached.ElevationGainM != nil {
 					elevationGain = *cached.ElevationGainM
 				}
+				elapsedSeconds := 0.0
+				if cached.ElapsedSeconds != nil {
+					elapsedSeconds = *cached.ElapsedSeconds
+				}
 				writeJSON(w, map[string]float64{
-					"avg_hr":         *cached.AvgHR,
-					"avg_speed":      *cached.AvgSpeed,
-					"distance":       distance,
-					"elevation_gain": elevationGain,
+					"avg_hr":          *cached.AvgHR,
+					"avg_speed":       *cached.AvgSpeed,
+					"distance":        distance,
+					"elevation_gain":  elevationGain,
+					"elapsed_seconds": elapsedSeconds,
 				})
 				return
 			}
@@ -825,16 +857,17 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			// Calculate if not cached (with mutex)
 			s.connMu.Lock()
 			query := `SELECT * FROM get_activity_segment_metrics($1, $2, $3, $4)`
-			var avgHR, avgSpeed, distanceM, elevationGainM float64
-			err = s.conn.QueryRow(s.ctx, query, segmentID, activityID, s.user.ID, tolerance).Scan(&avgHR, &avgSpeed, &distanceM, &elevationGainM)
+			var avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds float64
+			err = s.conn.QueryRow(s.ctx, query, segmentID, activityID, s.user.ID, tolerance).Scan(&avgHR, &avgSpeed, &distanceM, &elevationGainM, &elapsedSeconds)
 			s.connMu.Unlock()
 			if err != nil {
 				// If no rows returned (no matching points), return zeros
 				writeJSON(w, map[string]float64{
-					"avg_hr":         0,
-					"avg_speed":      0,
-					"distance":       0,
-					"elevation_gain": 0,
+					"avg_hr":          0,
+					"avg_speed":       0,
+					"distance":        0,
+					"elevation_gain":  0,
+					"elapsed_seconds": 0,
 				})
 				return
 			}
@@ -847,17 +880,18 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 				s.connMu.Unlock()
 				// Cache the metrics (with mutex)
 				s.connMu.Lock()
-				pggeo.CacheSegmentActivityMetrics(s.ctx, s.conn, segmentID, activityID, tolerance, startIndex, endIndex, avgHR, avgSpeed, distanceM, elevationGainM)
+				pggeo.CacheSegmentActivityMetrics(s.ctx, s.conn, segmentID, activityID, tolerance, startIndex, endIndex, avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds)
 				s.connMu.Unlock()
 			} else {
 				s.connMu.Unlock()
 			}
 
 			writeJSON(w, map[string]float64{
-				"avg_hr":         avgHR,
-				"avg_speed":      avgSpeed,
-				"distance":       distanceM,
-				"elevation_gain": elevationGainM,
+				"avg_hr":          avgHR,
+				"avg_speed":       avgSpeed,
+				"distance":        distanceM,
+				"elevation_gain":  elevationGainM,
+				"elapsed_seconds": elapsedSeconds,
 			})
 			return
 		}
@@ -876,8 +910,11 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 				sortBy = "distance" // default
 			}
 
+			s.connMu.Lock()
 			activities, err := pggeo.GetActivitiesForSegment(s.ctx, s.conn, s.user.ID, segmentID, tolerance, sortBy, forceRefresh)
+			s.connMu.Unlock()
 			if err != nil {
+				log.Printf("❌ Failed to load activities for segment %d: %v", segmentID, err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -885,8 +922,11 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Regular GET /api/segments/:id
+		s.connMu.Lock()
 		segment, err := pggeo.GetFavoriteSegment(s.ctx, s.conn, segmentID)
+		s.connMu.Unlock()
 		if err != nil {
+			log.Printf("❌ Failed to load segment %d: %v", segmentID, err)
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -898,8 +938,11 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, segment)
 	case "DELETE":
 		// Verify ownership before deleting
+		s.connMu.Lock()
 		segment, err := pggeo.GetFavoriteSegment(s.ctx, s.conn, segmentID)
+		s.connMu.Unlock()
 		if err != nil {
+			log.Printf("❌ Failed to load segment %d for delete: %v", segmentID, err)
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
@@ -908,8 +951,11 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		s.connMu.Lock()
 		err = pggeo.DeleteFavoriteSegment(s.ctx, s.conn, segmentID)
+		s.connMu.Unlock()
 		if err != nil {
+			log.Printf("❌ Failed to delete segment %d: %v", segmentID, err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -956,7 +1002,7 @@ func (s *server) handleSegmentsPage(w http.ResponseWriter, r *http.Request) {
 		Authorized:   s.token != "",
 	}
 
-	if err := s.tmpl.ExecuteTemplate(w, "segments.html", data); err != nil {
+	if err := s.executeTemplate(w, "segments.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1007,20 +1053,22 @@ func (s *server) handleSegmentPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		Segment      *pggeo.FavoriteSegment
-		Athlete      *strava.Athlete
-		ShowLoginCTA bool
-		Authorized   bool
-		MapboxToken  string
+		Segment             *pggeo.FavoriteSegment
+		Athlete             *strava.Athlete
+		ShowLoginCTA        bool
+		Authorized          bool
+		MapboxToken         string
+		MobileActivityOrder string
 	}{
-		Segment:      segment,
-		Athlete:      s.user,
-		ShowLoginCTA: s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:   s.token != "",
-		MapboxToken:  s.cfg.MapboxToken,
+		Segment:             segment,
+		Athlete:             s.user,
+		ShowLoginCTA:        s.token == "" && s.cfg.StravaClientID != "",
+		Authorized:          s.token != "",
+		MapboxToken:         s.cfg.MapboxToken,
+		MobileActivityOrder: s.cfg.MobileActivityOrder,
 	}
 
-	if err := s.tmpl.ExecuteTemplate(w, "segment.html", data); err != nil {
+	if err := s.executeTemplate(w, "segment.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -47,7 +47,13 @@
         
         try {
           map.addSource('route', { type: 'geojson', data: { type: 'FeatureCollection', features: lineSegments } });
-          map.addLayer({ id: 'route-line', type: 'line', source: 'route', paint: { 'line-color': '#4cc9f0', 'line-width': 3 } });
+          map.addLayer({
+            id: 'route-line',
+            type: 'line',
+            source: 'route',
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: { 'line-color': '#7cc8ff', 'line-width': 5, 'line-opacity': 0.95 }
+          });
         } catch (e) {
           console.warn('Error adding route source/layer:', e);
         }
@@ -121,7 +127,7 @@
 
         try {
           map.addSource('route-points', { type: 'geojson', data: fc });
-          map.addLayer({ id: 'route-points-layer', type: 'circle', source: 'route-points', paint: { 'circle-radius': 3, 'circle-color': '#f72585' } });
+          map.addLayer({ id: 'route-points-layer', type: 'circle', source: 'route-points', paint: { 'circle-radius': 3, 'circle-color': '#f72585', 'circle-opacity': 0 } });
         } catch (e) {
           console.warn('Error adding route points:', e);
         }
@@ -155,7 +161,9 @@
                 map.setPaintProperty('route-points-layer', 'circle-opacity', opacity);
                 map.setPaintProperty('route-points-layer', 'circle-color', '#f72585');
                 map.setPaintProperty('route-points-layer', 'circle-radius', 3);
-                map.setPaintProperty('route-line', 'line-color', '#4cc9f0');
+                map.setPaintProperty('route-line', 'line-color', '#7cc8ff');
+                map.setPaintProperty('route-line', 'line-opacity', 0.95);
+                map.setPaintProperty('route-line', 'line-width', 5);
                 if (legend) legend.style.display = 'none';
                 return;
               }
@@ -218,73 +226,166 @@
 
         // Segment creation functionality
         let selectedPoints = [];
-        let segmentPreviewLayer = null;
         const createSegmentBtn = document.getElementById('create-segment-btn');
+        const segmentCreatePanel = document.getElementById('segment-create-panel');
+        const segmentStepTitle = document.getElementById('segment-step-title');
+        const segmentStepCopy = document.getElementById('segment-step-copy');
+        const segmentSummary = document.getElementById('segment-summary');
+        const segmentResetBtn = document.getElementById('segment-reset-btn');
+        const segmentExitBtn = document.getElementById('segment-exit-btn');
+        const segmentSavePanelBtn = document.getElementById('segment-save-panel-btn');
         const segmentModal = document.getElementById('segment-modal');
         const segmentForm = document.getElementById('segment-form');
         const segmentCancelBtn = document.getElementById('segment-cancel-btn');
         const segmentSelectionInfo = document.getElementById('segment-selection-info');
 
-        if (createSegmentBtn && segmentModal && segmentForm) {
-          // Toggle segment creation mode
-          createSegmentBtn.addEventListener('click', () => {
-            segmentCreationMode = !segmentCreationMode;
-            createSegmentBtn.textContent = segmentCreationMode ? 'Cancel Segment' : 'Create Segment';
-            createSegmentBtn.style.background = segmentCreationMode ? '#e74c3c' : '';
+        if (createSegmentBtn && segmentModal && segmentForm && segmentCreatePanel) {
+          const removeLayerAndSource = (layerId, sourceId = layerId) => {
+            if (map.getLayer(layerId)) map.removeLayer(layerId);
+            if (map.getSource(sourceId)) map.removeSource(sourceId);
+          };
+
+          const distanceMeters = (fromIdx, toIdx) => {
+            let total = 0;
+            const start = Math.max(0, Math.min(fromIdx, toIdx));
+            const end = Math.min(lineCoords.length - 1, Math.max(fromIdx, toIdx));
+            const radius = 6371000;
+            for (let i = start + 1; i <= end; i++) {
+              const prev = lineCoords[i - 1];
+              const curr = lineCoords[i];
+              const dLat = (curr[1] - prev[1]) * Math.PI / 180;
+              const dLng = (curr[0] - prev[0]) * Math.PI / 180;
+              const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(prev[1] * Math.PI / 180) * Math.cos(curr[1] * Math.PI / 180) *
+                Math.sin(dLng / 2) * Math.sin(dLng / 2);
+              total += radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            }
+            return total;
+          };
+
+          const formatSegmentDistance = meters => meters >= 1000 ? `${(meters / 1000).toFixed(2)} km` : `${Math.round(meters)} m`;
+          const formatSegmentDuration = (fromIdx, toIdx) => {
+            const start = points[Math.min(fromIdx, toIdx)];
+            const end = points[Math.max(fromIdx, toIdx)];
+            if (!start?.time || !end?.time) return 'n/a';
+            const seconds = Math.max(0, Math.round((new Date(end.time) - new Date(start.time)) / 1000));
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+            return `${m}m ${String(s).padStart(2, '0')}s`;
+          };
+
+          const setPanelState = (title, copy) => {
+            if (segmentStepTitle) segmentStepTitle.textContent = title;
+            if (segmentStepCopy) segmentStepCopy.textContent = copy;
+          };
+
+          const setSummary = () => {
+            const hasSelection = selectedPoints.length === 2;
+            if (!segmentSummary) return;
+            segmentSummary.hidden = !hasSelection;
+            if (segmentSavePanelBtn) segmentSavePanelBtn.hidden = !hasSelection;
+            if (!hasSelection) {
+              segmentSummary.innerHTML = '';
+              return;
+            }
+            const [startIdx, endIdx] = selectedPoints;
+            segmentSummary.innerHTML = `
+              <div class="segment-summary-item">
+                <span class="segment-summary-label">Distance</span>
+                <span class="segment-summary-value">${formatSegmentDistance(distanceMeters(startIdx, endIdx))}</span>
+              </div>
+              <div class="segment-summary-item">
+                <span class="segment-summary-label">Duration</span>
+                <span class="segment-summary-value">${formatSegmentDuration(startIdx, endIdx)}</span>
+              </div>
+              <div class="segment-summary-item">
+                <span class="segment-summary-label">Points</span>
+                <span class="segment-summary-value">${endIdx - startIdx + 1}</span>
+              </div>
+            `;
+          };
+
+          const showPointSelection = () => {
+            const currentMetric = select ? select.value : 'none';
+            if (currentMetric === 'none' && map.getLayer('route-points-layer')) {
+              map.setPaintProperty('route-points-layer', 'circle-opacity', 1);
+              map.setPaintProperty('route-points-layer', 'circle-color', '#f72585');
+              map.setPaintProperty('route-points-layer', 'circle-radius', 4);
+            }
+          };
+
+          const clearSelectionLayers = () => {
+            removeLayerAndSource('segment-preview');
+            removeLayerAndSource('segment-first-point');
+          };
+
+          const resetSegmentSelection = () => {
             selectedPoints = [];
-            
-            // Remove preview and highlight layers
-            if (segmentPreviewLayer && map.getLayer('segment-preview')) {
-              map.removeLayer('segment-preview');
-              map.removeSource('segment-preview');
+            clearSelectionLayers();
+            setPanelState('Select start', 'Tap the route where the segment should begin.');
+            if (segmentSelectionInfo) segmentSelectionInfo.textContent = 'Select a start point, then a finish point on the map.';
+            setSummary();
+            showPointSelection();
+          };
+
+          const openSegmentModal = () => {
+            if (selectedPoints.length !== 2) return;
+            if (segmentSelectionInfo) {
+              segmentSelectionInfo.textContent = `Selected ${formatSegmentDistance(distanceMeters(selectedPoints[0], selectedPoints[1]))} over ${formatSegmentDuration(selectedPoints[0], selectedPoints[1])}. Add a name to save it.`;
             }
-            if (map.getLayer('segment-first-point')) {
-              map.removeLayer('segment-first-point');
-              map.removeSource('segment-first-point');
-            }
-            
-            if (segmentCreationMode) {
+            segmentModal.style.display = 'flex';
+            const nameInput = document.getElementById('segment-name');
+            if (nameInput) setTimeout(() => nameInput.focus(), 0);
+          };
+
+          const setSegmentMode = active => {
+            segmentCreationMode = active;
+            document.body.classList.toggle('segment-mode-active', active);
+            createSegmentBtn.textContent = active ? 'Cancel Segment' : 'Create Segment';
+            createSegmentBtn.classList.toggle('danger-btn', active);
+            segmentCreatePanel.hidden = !active;
+            segmentModal.style.display = 'none';
+
+            if (active) {
+              resetSegmentSelection();
               map.getCanvas().style.cursor = 'crosshair';
-              segmentSelectionInfo.textContent = 'Click two points on the map to select a segment.';
-              
-              // Show points even if color metric is "none"
-              const currentMetric = select ? select.value : 'none';
-              if (currentMetric === 'none') {
-                map.setPaintProperty('route-points-layer', 'circle-opacity', 1);
-                map.setPaintProperty('route-points-layer', 'circle-color', '#f72585');
-                map.setPaintProperty('route-points-layer', 'circle-radius', 3);
-              }
+              setTimeout(() => {
+                segmentCreatePanel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                map.resize();
+              }, 0);
             } else {
+              resetSegmentSelection();
               map.getCanvas().style.cursor = '';
-              segmentModal.style.display = 'none';
-              
-              // Restore original color metric state
-              if (select) {
-                const applyColor = select._applyColor;
-                if (applyColor) applyColor();
-              }
+              if (select?._applyColor) select._applyColor();
+              setTimeout(() => map.resize(), 0);
             }
-          });
+          };
+
+          createSegmentBtn.addEventListener('click', () => setSegmentMode(!segmentCreationMode));
 
           // Handle point selection
-          const originalClickHandler = map.on('click', 'route-points-layer', (e) => {
+          map.on('click', 'route-points-layer', (e) => {
             if (!segmentCreationMode) return;
             const f = e.features && e.features[0];
             if (!f) return;
             const idx = f.properties.idx;
+
+            if (selectedPoints.length === 2) {
+              resetSegmentSelection();
+            }
             
             if (selectedPoints.length === 0) {
               selectedPoints = [idx];
-              segmentSelectionInfo.textContent = `First point selected (index ${idx}). Click another point.`;
+              setPanelState('Select finish', 'Tap the route where this segment should end.');
+              if (segmentSelectionInfo) segmentSelectionInfo.textContent = `Start selected at point ${idx}. Now select a finish point.`;
               
               // Highlight the first selected point
               const firstPoint = features[idx];
               if (firstPoint) {
                 // Remove existing highlight if any
-                if (map.getLayer('segment-first-point')) {
-                  map.removeLayer('segment-first-point');
-                  map.removeSource('segment-first-point');
-                }
+                removeLayerAndSource('segment-first-point');
                 
                 // Add highlight for first point
                 map.addSource('segment-first-point', {
@@ -311,12 +412,14 @@
               const startIdx = selectedPoints[0];
               const endIdx = idx;
               if (startIdx === endIdx) {
-                segmentSelectionInfo.textContent = 'Please select a different point.';
+                setPanelState('Select finish', 'Choose a different point for the segment finish.');
+                if (segmentSelectionInfo) segmentSelectionInfo.textContent = 'Please select a different point.';
                 return;
               }
               // Ensure start < end
               selectedPoints = [Math.min(startIdx, endIdx), Math.max(startIdx, endIdx)];
-              segmentSelectionInfo.textContent = `Segment selected: points ${selectedPoints[0]} to ${selectedPoints[1]}.`;
+              setPanelState('Ready to save', 'Review the selected route section, then name the segment.');
+              if (segmentSelectionInfo) segmentSelectionInfo.textContent = `Segment selected: points ${selectedPoints[0]} to ${selectedPoints[1]}.`;
 
               // Show preview line
               const previewCoords = lineCoords.slice(selectedPoints[0], selectedPoints[1] + 1);
@@ -334,41 +437,21 @@
                   id: 'segment-preview',
                   type: 'line',
                   source: 'segment-preview',
-                  paint: { 'line-color': '#f1c40f', 'line-width': 4, 'line-opacity': 0.8 }
+                  paint: { 'line-color': '#f1c40f', 'line-width': 6, 'line-opacity': 0.9 }
                 });
               }
-
-              // Show modal
-              segmentModal.style.display = 'flex';
+              setSummary();
             }
           });
+
+          if (segmentResetBtn) segmentResetBtn.addEventListener('click', resetSegmentSelection);
+          if (segmentExitBtn) segmentExitBtn.addEventListener('click', () => setSegmentMode(false));
+          if (segmentSavePanelBtn) segmentSavePanelBtn.addEventListener('click', openSegmentModal);
 
           // Cancel segment creation
           if (segmentCancelBtn) {
             segmentCancelBtn.addEventListener('click', () => {
               segmentModal.style.display = 'none';
-              segmentCreationMode = false;
-              createSegmentBtn.textContent = 'Create Segment';
-              createSegmentBtn.style.background = '';
-              selectedPoints = [];
-              
-              // Remove preview and highlight layers
-              if (map.getLayer('segment-preview')) {
-                map.removeLayer('segment-preview');
-                map.removeSource('segment-preview');
-              }
-              if (map.getLayer('segment-first-point')) {
-                map.removeLayer('segment-first-point');
-                map.removeSource('segment-first-point');
-              }
-              
-              map.getCanvas().style.cursor = '';
-              
-              // Restore original color metric state
-              if (select) {
-                const applyColor = select._applyColor;
-                if (applyColor) applyColor();
-              }
             });
           }
 
@@ -408,32 +491,13 @@
                 }
 
                 const segment = await response.json();
-                alert(`Segment "${segment.name}" created successfully!`);
-                
-                // Reset form and close modal
                 segmentForm.reset();
-                segmentModal.style.display = 'none';
-                segmentCreationMode = false;
-                createSegmentBtn.textContent = 'Create Segment';
-                createSegmentBtn.style.background = '';
-                selectedPoints = [];
-                
-                // Remove preview and highlight layers
-                if (map.getLayer('segment-preview')) {
-                  map.removeLayer('segment-preview');
-                  map.removeSource('segment-preview');
-                }
-                if (map.getLayer('segment-first-point')) {
-                  map.removeLayer('segment-first-point');
-                  map.removeSource('segment-first-point');
-                }
-                
-                map.getCanvas().style.cursor = '';
-                
-                // Restore original color metric state
-                if (select) {
-                  const applyColor = select._applyColor;
-                  if (applyColor) applyColor();
+                const segmentID = segment.id || segment.ID;
+                if (segmentID) {
+                  window.location.href = `/segment/${segmentID}`;
+                } else {
+                  setSegmentMode(false);
+                  window.location.href = '/segments';
                 }
               } catch (error) {
                 alert('Error creating segment: ' + error.message);
@@ -497,6 +561,7 @@
                 chartInstance.destroy();
                 chartInstance = null;
               }
+              if (graphContainer) graphContainer.classList.add('graph-empty');
               if (graphCanvas) graphCanvas.style.display = 'none';
               if (placeholder) placeholder.style.display = 'block';
               // Keep container visible so users can select metrics
@@ -504,6 +569,7 @@
             }
             
             // Hide placeholder and show canvas
+            if (graphContainer) graphContainer.classList.remove('graph-empty');
             if (placeholder) placeholder.style.display = 'none';
             if (graphCanvas) {
               graphCanvas.style.display = 'block';
@@ -881,6 +947,7 @@
           if (xAxisSelect) {
             xAxisSelect.addEventListener('change', updateGraph);
           }
+          updateGraph();
         }
       });
     });
@@ -1359,6 +1426,97 @@
     let selectedActivityID = null;
     let currentActivityFeatures = null; // Store features for color metric changes
 
+    const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[ch]));
+
+    const secondsValue = value => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null;
+    const speedValue = activity => Number(activity.segment_avg_speed || activity.average_speed || 0);
+    const hrValue = activity => Number(activity.segment_avg_hr || activity.average_heartrate || 0);
+    const effortDate = activity => {
+      const raw = activity.start_date_formatted || activity.start_date;
+      const date = raw ? new Date(raw) : null;
+      return date && !Number.isNaN(date.getTime()) ? date : null;
+    };
+    const formatEffortDate = activity => {
+      const date = effortDate(activity);
+      return date ? date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown';
+    };
+    const formatDuration = seconds => {
+      const value = secondsValue(seconds);
+      if (value === null) return 'n/a';
+      const total = Math.round(value);
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      return `${m}:${String(s).padStart(2, '0')}`;
+    };
+    const formatDelta = seconds => {
+      if (!Number.isFinite(seconds)) return 'n/a';
+      const sign = seconds > 0 ? '+' : seconds < 0 ? '-' : '';
+      return `${sign}${formatDuration(Math.abs(seconds))}`;
+    };
+    const enrichEfforts = activities => {
+      const withTime = activities.filter(activity => secondsValue(activity.segment_elapsed_seconds) !== null);
+      const bestTime = withTime.length > 0 ? Math.min(...withTime.map(activity => secondsValue(activity.segment_elapsed_seconds))) : null;
+      const chronological = [...withTime].sort((a, b) => {
+        const ad = effortDate(a)?.getTime() || 0;
+        const bd = effortDate(b)?.getTime() || 0;
+        return ad - bd;
+      });
+      const previousByID = new Map();
+      for (let i = 1; i < chronological.length; i++) {
+        const current = chronological[i];
+        const previous = chronological[i - 1];
+        previousByID.set(current.id, secondsValue(current.segment_elapsed_seconds) - secondsValue(previous.segment_elapsed_seconds));
+      }
+
+      return activities.map(activity => {
+        const effortSeconds = secondsValue(activity.segment_elapsed_seconds);
+        return {
+          ...activity,
+          effortSeconds,
+          deltaBest: effortSeconds !== null && bestTime !== null ? effortSeconds - bestTime : null,
+          deltaPrevious: previousByID.has(activity.id) ? previousByID.get(activity.id) : null
+        };
+      });
+    };
+
+    const renderEffortSummary = efforts => {
+      const timed = efforts.filter(effort => effort.effortSeconds !== null);
+      const best = timed.length > 0 ? timed.reduce((winner, effort) => effort.effortSeconds < winner.effortSeconds ? effort : winner, timed[0]) : null;
+      const latest = timed.length > 0 ? timed.reduce((winner, effort) => {
+        const effortTime = effortDate(effort)?.getTime() || 0;
+        const winnerTime = effortDate(winner)?.getTime() || 0;
+        return effortTime > winnerTime ? effort : winner;
+      }, timed[0]) : null;
+      const avgHr = timed.map(hrValue).filter(Boolean);
+      const avgHrValue = avgHr.length > 0 ? Math.round(avgHr.reduce((sum, value) => sum + value, 0) / avgHr.length) : null;
+
+      return `
+        <div class="effort-summary-grid">
+          <div class="stat-card">
+            <span class="stat-label">Efforts</span>
+            <strong>${efforts.length}</strong>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Best</span>
+            <strong>${best ? formatDuration(best.effortSeconds) : 'n/a'}</strong>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Avg HR</span>
+            <strong>${avgHrValue ? `${avgHrValue} bpm` : 'n/a'}</strong>
+          </div>
+        </div>
+        ${latest ? `<div class="meta">Latest effort: ${formatEffortDate(latest)} (${formatDuration(latest.effortSeconds)})</div>` : ''}
+      `;
+    };
+
     function loadActivities(forceRefresh = false) {
       const tolerance = parseFloat(toleranceInput.value) || 15;
       const sortBy = sortSelect.value || 'distance';
@@ -1368,66 +1526,73 @@
       activitiesSection.style.display = 'none';
 
       fetch(`/api/segments/${segmentID}/activities?tolerance=${tolerance}&sort=${sortBy}${refreshParam}`)
-        .then(r => r.json())
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+          return r.json();
+        })
         .then(activities => {
           activitiesLoading.style.display = 'none';
           activitiesSection.style.display = 'block';
 
           if (activities.length === 0) {
-            activitiesList.innerHTML = '<div>No activities found matching this segment.</div>';
+            activitiesList.innerHTML = '<div class="muted">No same-direction efforts found for this segment.</div>';
             return;
           }
 
-          activitiesList.innerHTML = activities.map(activity => {
-            // Format date
-            let dateStr = 'Unknown date';
-            if (activity.start_date_formatted) {
-              try {
-                dateStr = new Date(activity.start_date_formatted).toLocaleString();
-              } catch (e) {
-                dateStr = activity.start_date_formatted;
-              }
-            } else if (activity.start_date) {
-              try {
-                dateStr = new Date(activity.start_date).toLocaleString();
-              } catch (e) {
-                dateStr = activity.start_date;
-              }
-            }
-            
-            return `
-            <div class="item" data-activity-id="${activity.id}" style="cursor: pointer; padding: 8px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 4px; ${selectedActivityID === activity.id ? 'background: var(--panel); border-color: #4cc9f0;' : ''}">
-              <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div style="flex: 1;">
-                  <div style="font-weight: 500;">${activity.name}</div>
-                  <div class="meta">${dateStr}</div>
-                  <div class="meta">Match: ${activity.min_distance_m.toFixed(1)}m distance, ${activity.overlap_percentage.toFixed(1)}% overlap</div>
-                  <div class="meta" id="segment-metrics-${activity.id}" style="margin-top: 4px;">
-                    <span style="color: #4cc9f0;">Loading segment metrics...</span>
-                  </div>
-                </div>
-                <a class="link" href="/activity/${activity.id}" style="margin-left: 12px; white-space: nowrap;" onclick="event.stopPropagation();">View Full</a>
-              </div>
+          const efforts = enrichEfforts(activities);
+          activitiesList.innerHTML = `
+            ${renderEffortSummary(efforts)}
+            <div class="effort-table-wrap">
+              <table class="effort-table">
+                <thead>
+                  <tr>
+                    <th>Effort</th>
+                    <th>Time</th>
+                    <th>HR</th>
+                    <th>Speed</th>
+                    <th>Δ best</th>
+                    <th>Δ prev</th>
+                    <th>Match</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${efforts.map(activity => {
+                    const speed = speedValue(activity);
+                    const hr = hrValue(activity);
+                    const deltaBestClass = activity.deltaBest === 0 ? 'delta-good' : 'delta-slow';
+                    const deltaPrevClass = activity.deltaPrevious !== null && activity.deltaPrevious <= 0 ? 'delta-good' : 'delta-slow';
+                    return `
+                      <tr class="effort-row ${selectedActivityID === activity.id ? 'selected' : ''}" data-activity-id="${activity.id}">
+                        <td>
+                          <span class="effort-name">${escapeHtml(activity.name || 'Activity')}</span>
+                          <span class="meta">${formatEffortDate(activity)} · <a class="link" href="/activity/${activity.id}">Open</a></span>
+                        </td>
+                        <td>${formatDuration(activity.effortSeconds)}</td>
+                        <td>${hr > 0 ? `${Math.round(hr)}` : 'n/a'}</td>
+                        <td>${speed > 0 ? `${(speed * 3.6).toFixed(1)}` : 'n/a'}</td>
+                        <td class="${deltaBestClass}">${activity.deltaBest === null ? 'n/a' : formatDelta(activity.deltaBest)}</td>
+                        <td class="${deltaPrevClass}">${activity.deltaPrevious === null ? 'n/a' : formatDelta(activity.deltaPrevious)}</td>
+                        <td>${activity.overlap_percentage ? `${activity.overlap_percentage.toFixed(0)}%` : 'n/a'}</td>
+                      </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
             </div>
           `;
-          }).join('');
 
           // Add click handlers
-          activitiesList.querySelectorAll('.item[data-activity-id]').forEach(item => {
-            item.addEventListener('click', (e) => {
+          activitiesList.querySelectorAll('.effort-row[data-activity-id]').forEach(row => {
+            row.addEventListener('click', (e) => {
               // Don't navigate if clicking on the "View Full" link
               if (e.target.tagName === 'A') return;
               
-              const activityID = parseInt(item.getAttribute('data-activity-id'));
+              const activityID = parseInt(row.getAttribute('data-activity-id'));
               selectedActivityID = activityID;
               
               // Update selected style
-              activitiesList.querySelectorAll('.item').forEach(i => {
-                i.style.background = '';
-                i.style.borderColor = 'var(--border)';
-              });
-              item.style.background = 'var(--panel)';
-              item.style.borderColor = '#4cc9f0';
+              activitiesList.querySelectorAll('.effort-row').forEach(i => i.classList.remove('selected'));
+              row.classList.add('selected');
 
               // Load and display activity points with segment portion highlighted
               // Preserve color metric selection
@@ -1435,17 +1600,11 @@
               loadActivityPoints(activityID, segmentID, tolerance, currentColorMetric);
             });
           });
-          
-          // Load segment metrics for all activities with delay to avoid race conditions
-          activities.forEach((activity, index) => {
-            setTimeout(() => {
-              loadSegmentMetrics(activity.id, segmentID, tolerance);
-            }, index * 50); // Stagger requests by 50ms each
-          });
         })
         .catch(err => {
           activitiesLoading.style.display = 'none';
-          activitiesList.innerHTML = `<div style="color: #e74c3c;">Error loading activities: ${err.message}</div>`;
+          activitiesSection.style.display = 'block';
+          activitiesList.innerHTML = `<div class="delta-slow">Error loading efforts: ${escapeHtml(err.message)}</div>`;
         });
     }
 
@@ -1721,6 +1880,7 @@
           segmentChartInstance.destroy();
           segmentChartInstance = null;
         }
+        if (graphContainer) graphContainer.classList.add('graph-empty');
         if (graphCanvas) graphCanvas.style.display = 'none';
         if (placeholder) placeholder.style.display = 'block';
         // Keep container visible so users can select metrics
@@ -1728,6 +1888,7 @@
       }
       
       // Hide placeholder and show canvas
+      if (graphContainer) graphContainer.classList.remove('graph-empty');
       if (placeholder) placeholder.style.display = 'none';
       if (graphCanvas) {
         graphCanvas.style.display = 'block';
@@ -2236,6 +2397,7 @@
         }
       });
     }
+    loadActivities(false);
   }
 
   if (document.readyState === 'loading') {
@@ -2244,5 +2406,3 @@
     onActivityPage(); onIndexPage(); onSegmentsPage(); onSegmentPage();
   }
 })();
-
-

@@ -21,18 +21,20 @@ import (
 )
 
 type Config struct {
-	StravaClientID     string `yaml:"strava_client_id"`
-	StravaClientSecret string `yaml:"strava_client_secret"`
-	StravaRedirectURI  string `yaml:"strava_redirect_uri"`
-	MapboxToken        string `yaml:"mapbox_token"`
-	PGIP               string `yaml:"pg_ip"`
-	PGPort             string `yaml:"pg_port"`
-	PGUser             string `yaml:"pg_user"`
-	PGPassword         string `yaml:"pg_secret"`
-	PGDatabase         string `yaml:"pg_db"`
-	WebHost            string `yaml:"web_host"`
-	WebPort            string `yaml:"web_port"`
-	WebProtocol        string `yaml:"web_protocol"` // "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy
+	StravaClientID      string `yaml:"strava_client_id"`
+	StravaClientSecret  string `yaml:"strava_client_secret"`
+	StravaRedirectURI   string `yaml:"strava_redirect_uri"`
+	MapboxToken         string `yaml:"mapbox_token"`
+	PGIP                string `yaml:"pg_ip"`
+	PGPort              string `yaml:"pg_port"`
+	PGUser              string `yaml:"pg_user"`
+	PGPassword          string `yaml:"pg_secret"`
+	PGDatabase          string `yaml:"pg_db"`
+	WebHost             string `yaml:"web_host"`
+	WebPort             string `yaml:"web_port"`
+	WebProtocol         string `yaml:"web_protocol"` // "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy
+	DevReloadTemplates  bool   `yaml:"dev_reload_templates"`
+	MobileActivityOrder string `yaml:"mobile_activity_order"`
 }
 
 func main() {
@@ -52,6 +54,8 @@ func main() {
 		log.Fatalf("Error reading config file: %v", err)
 	}
 	yaml.Unmarshal(yamlFile, &config)
+	applyEnvOverrides(&config)
+	normalizeConfig(&config)
 
 	// Construct redirect URI from host and port if not explicitly provided
 	if config.StravaRedirectURI == "" {
@@ -68,7 +72,7 @@ func main() {
 		if config.WebProtocol == "https" {
 			protocol = "https"
 		}
-		
+
 		// For standard ports (80 for HTTP, 443 for HTTPS), omit port in URL
 		// For non-standard ports, include port in URL
 		var redirectURI string
@@ -83,7 +87,7 @@ func main() {
 			// HTTP with non-standard port - include port
 			redirectURI = fmt.Sprintf("%s://%s:%s/strava/callback", protocol, webHost, webPort)
 		}
-		
+
 		config.StravaRedirectURI = redirectURI
 		log.Printf("📝 Constructed Strava redirect URI: %s", config.StravaRedirectURI)
 		if protocol == "http" {
@@ -93,7 +97,7 @@ func main() {
 
 	// Connect to database
 	ctx := context.Background()
-	conn, err := pggeo.Connect(ctx, config.PGUser, config.PGPassword, config.PGIP, config.PGPort, config.PGDatabase)
+	conn, err := connectDatabase(ctx, config)
 	if err != nil {
 		log.Fatalf("Error connecting to database: %v", err)
 	}
@@ -134,18 +138,20 @@ func main() {
 
 	// Default behavior: serve web UI (if -serve is provided or not)
 	web.RunServer(ctx, web.Config{
-		StravaClientID:     config.StravaClientID,
-		StravaClientSecret: config.StravaClientSecret,
-		StravaRedirectURI:  config.StravaRedirectURI,
-		MapboxToken:        config.MapboxToken,
-		PGIP:               config.PGIP,
-		PGPort:             config.PGPort,
-		PGUser:             config.PGUser,
-		PGPassword:         config.PGPassword,
-		PGDatabase:         config.PGDatabase,
-		WebHost:            config.WebHost,
-		WebPort:            config.WebPort,
-		WebProtocol:        config.WebProtocol,
+		StravaClientID:      config.StravaClientID,
+		StravaClientSecret:  config.StravaClientSecret,
+		StravaRedirectURI:   config.StravaRedirectURI,
+		MapboxToken:         config.MapboxToken,
+		PGIP:                config.PGIP,
+		PGPort:              config.PGPort,
+		PGUser:              config.PGUser,
+		PGPassword:          config.PGPassword,
+		PGDatabase:          config.PGDatabase,
+		WebHost:             config.WebHost,
+		WebPort:             config.WebPort,
+		WebProtocol:         config.WebProtocol,
+		DevReloadTemplates:  config.DevReloadTemplates,
+		MobileActivityOrder: config.MobileActivityOrder,
 	})
 }
 
@@ -231,6 +237,75 @@ func validateDatabaseSchema(ctx context.Context, conn *pgx.Conn, forceRebuild bo
 	log.Printf("📊 All tables validated and migrated as needed")
 }
 
+func applyEnvOverrides(config *Config) {
+	envString(&config.StravaClientID, "B11K_STRAVA_CLIENT_ID")
+	envString(&config.StravaClientSecret, "B11K_STRAVA_CLIENT_SECRET")
+	envString(&config.StravaRedirectURI, "B11K_STRAVA_REDIRECT_URI")
+	envString(&config.MapboxToken, "B11K_MAPBOX_TOKEN")
+	envString(&config.PGIP, "B11K_PG_HOST", "B11K_PG_IP")
+	envString(&config.PGPort, "B11K_PG_PORT")
+	envString(&config.PGUser, "B11K_PG_USER")
+	envString(&config.PGPassword, "B11K_PG_PASSWORD", "B11K_PG_SECRET")
+	envString(&config.PGDatabase, "B11K_PG_DATABASE", "B11K_PG_DB")
+	envString(&config.WebHost, "B11K_WEB_HOST")
+	envString(&config.WebPort, "B11K_WEB_PORT")
+	envString(&config.WebProtocol, "B11K_WEB_PROTOCOL")
+	envString(&config.MobileActivityOrder, "B11K_MOBILE_ACTIVITY_ORDER")
+	envBool(&config.DevReloadTemplates, "B11K_DEV_RELOAD_TEMPLATES")
+}
+
+func envString(target *string, names ...string) {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			*target = value
+			return
+		}
+	}
+}
+
+func envBool(target *bool, names ...string) {
+	for _, name := range names {
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			continue
+		}
+		switch value {
+		case "1", "true", "TRUE", "yes", "YES", "on", "ON":
+			*target = true
+		case "0", "false", "FALSE", "no", "NO", "off", "OFF":
+			*target = false
+		}
+		return
+	}
+}
+
+func normalizeConfig(config *Config) {
+	switch config.MobileActivityOrder {
+	case "map_first", "stats_first":
+	default:
+		config.MobileActivityOrder = "stats_first"
+	}
+}
+
+func connectDatabase(ctx context.Context, config Config) (*pgx.Conn, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 30; attempt++ {
+		conn, err := pggeo.Connect(ctx, config.PGUser, config.PGPassword, config.PGIP, config.PGPort, config.PGDatabase)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		log.Printf("Waiting for database at %s:%s (%d/30): %v", config.PGIP, config.PGPort, attempt, err)
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return nil, lastErr
+}
+
 func runSync(ctx context.Context, config Config) {
 	// Authenticate with Strava
 	authCfg := strava.NewStravaAuthConfig(config.StravaClientID, config.StravaClientSecret, config.StravaRedirectURI)
@@ -241,7 +316,7 @@ func runSync(ctx context.Context, config Config) {
 
 	// Create database tables if they don't exist
 	log.Printf("🔧 Setting up database tables...")
-	conn, err := pggeo.Connect(ctx, config.PGUser, config.PGPassword, config.PGIP, config.PGPort, config.PGDatabase)
+	conn, err := connectDatabase(ctx, config)
 	if err != nil {
 		log.Fatalf("Error connecting to database: %v", err)
 	}

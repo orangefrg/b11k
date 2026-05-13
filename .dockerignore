@@ -50,6 +50,8 @@ run.sh
 *.service.template
 *.service
 
-# Note: config.yaml is NOT ignored so it can be copied into the image
-# For production, it's recommended to mount config.yaml as a volume instead
-
+# Runtime configuration and secrets should be mounted or passed as env vars.
+config.yaml
+.env
+.env.*
+!.env.example

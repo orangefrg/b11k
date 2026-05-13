@@ -21,6 +21,8 @@ type SegmentActivityCacheEntry struct {
 	AvgSpeed          *float64
 	DistanceM         *float64
 	ElevationGainM    *float64
+	ElapsedSeconds    *float64
+	DirectionChecked  bool
 }
 
 // CacheSegmentActivityMatches caches segment-activity match results
@@ -48,13 +50,14 @@ func CacheSegmentActivityMatches(ctx context.Context, conn *pgx.Conn, segmentID 
 
 		_, err := conn.Exec(ctx, `
 			INSERT INTO segment_activity_matches 
-			(segment_id, activity_id, tolerance_meters, min_distance_m, overlap_length_m, overlap_percentage, cached_at)
-			VALUES ($1, $2, $3, $4, $5, $6, NOW())
+			(segment_id, activity_id, tolerance_meters, min_distance_m, overlap_length_m, overlap_percentage, direction_checked, cached_at)
+			VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW())
 			ON CONFLICT (segment_id, activity_id, tolerance_meters) 
 			DO UPDATE SET 
 				min_distance_m = EXCLUDED.min_distance_m,
 				overlap_length_m = EXCLUDED.overlap_length_m,
 				overlap_percentage = EXCLUDED.overlap_percentage,
+				direction_checked = TRUE,
 				cached_at = NOW()
 		`, segmentID, match.ActivityID, toleranceMeters, match.MinDistanceM, match.OverlapLengthM, overlapPct)
 		if err != nil {
@@ -66,8 +69,8 @@ func CacheSegmentActivityMatches(ctx context.Context, conn *pgx.Conn, segmentID 
 }
 
 // CacheSegmentActivityMetrics caches metrics for a segment-activity match
-func CacheSegmentActivityMetrics(ctx context.Context, conn *pgx.Conn, segmentID, activityID int64, toleranceMeters float64, startIndex, endIndex int, avgHR, avgSpeed, distanceM, elevationGainM float64) error {
-	_, err := conn.Exec(ctx, `
+func CacheSegmentActivityMetrics(ctx context.Context, conn *pgx.Conn, segmentID, activityID int64, toleranceMeters float64, startIndex, endIndex int, avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds float64) error {
+	tag, err := conn.Exec(ctx, `
 		UPDATE segment_activity_matches
 		SET start_index = $1,
 			end_index = $2,
@@ -75,16 +78,18 @@ func CacheSegmentActivityMetrics(ctx context.Context, conn *pgx.Conn, segmentID,
 			avg_speed = $4,
 			distance_m = $5,
 			elevation_gain_m = $6,
+			elapsed_seconds = $7,
+			direction_checked = TRUE,
 			cached_at = NOW()
-		WHERE segment_id = $7 AND activity_id = $8 AND tolerance_meters = $9
-	`, startIndex, endIndex, avgHR, avgSpeed, distanceM, elevationGainM, segmentID, activityID, toleranceMeters)
-	if err != nil {
-		// If update didn't affect any rows, try insert (match might not exist yet)
+		WHERE segment_id = $8 AND activity_id = $9 AND tolerance_meters = $10
+	`, startIndex, endIndex, avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds, segmentID, activityID, toleranceMeters)
+	if err != nil || tag.RowsAffected() == 0 {
+		// If update didn't affect any rows, try insert (match might not exist yet).
 		_, err = conn.Exec(ctx, `
 			INSERT INTO segment_activity_matches 
 			(segment_id, activity_id, tolerance_meters, min_distance_m, overlap_length_m, overlap_percentage,
-			 start_index, end_index, avg_hr, avg_speed, distance_m, elevation_gain_m, cached_at)
-			VALUES ($7, $8, $9, 0, 0, 0, $1, $2, $3, $4, $5, $6, NOW())
+			 start_index, end_index, avg_hr, avg_speed, distance_m, elevation_gain_m, elapsed_seconds, direction_checked, cached_at)
+			VALUES ($8, $9, $10, 0, 0, 0, $1, $2, $3, $4, $5, $6, $7, TRUE, NOW())
 			ON CONFLICT (segment_id, activity_id, tolerance_meters) 
 			DO UPDATE SET 
 				start_index = EXCLUDED.start_index,
@@ -93,8 +98,10 @@ func CacheSegmentActivityMetrics(ctx context.Context, conn *pgx.Conn, segmentID,
 				avg_speed = EXCLUDED.avg_speed,
 				distance_m = EXCLUDED.distance_m,
 				elevation_gain_m = EXCLUDED.elevation_gain_m,
+				elapsed_seconds = EXCLUDED.elapsed_seconds,
+				direction_checked = TRUE,
 				cached_at = NOW()
-		`, startIndex, endIndex, avgHR, avgSpeed, distanceM, elevationGainM, segmentID, activityID, toleranceMeters)
+		`, startIndex, endIndex, avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds, segmentID, activityID, toleranceMeters)
 		if err != nil {
 			return fmt.Errorf("failed to cache metrics: %w", err)
 		}
@@ -107,14 +114,14 @@ func GetCachedSegmentActivityMetrics(ctx context.Context, conn *pgx.Conn, segmen
 	var entry SegmentActivityCacheEntry
 	err := conn.QueryRow(ctx, `
 		SELECT segment_id, activity_id, tolerance_meters, min_distance_m, overlap_length_m, overlap_percentage,
-			start_index, end_index, avg_hr, avg_speed, distance_m, elevation_gain_m
+			start_index, end_index, avg_hr, avg_speed, distance_m, elevation_gain_m, elapsed_seconds, direction_checked
 		FROM segment_activity_matches
-		WHERE segment_id = $1 AND activity_id = $2 AND tolerance_meters = $3
+		WHERE segment_id = $1 AND activity_id = $2 AND tolerance_meters = $3 AND direction_checked = TRUE
 	`, segmentID, activityID, toleranceMeters).Scan(
 		&entry.SegmentID, &entry.ActivityID, &entry.ToleranceMeters,
 		&entry.MinDistanceM, &entry.OverlapLengthM, &entry.OverlapPercentage,
 		&entry.StartIndex, &entry.EndIndex, &entry.AvgHR, &entry.AvgSpeed,
-		&entry.DistanceM, &entry.ElevationGainM,
+		&entry.DistanceM, &entry.ElevationGainM, &entry.ElapsedSeconds, &entry.DirectionChecked,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
