@@ -1,0 +1,22 @@
+{{define "color_controls"}}
+<section class="color-panel" aria-label="Route coloring">
+  <div class="control color-panel-control">
+    <label for="color-metric">
+      <span class="color-panel-label">Route color</span>
+      <select id="color-metric">
+        <option value="none">None</option>
+        <option value="speed">Speed</option>
+        <option value="heartrate">Heart rate</option>
+        <option value="hrzones">HR zones</option>
+        <option value="alt">Altitude</option>
+        <option value="grade">Slope</option>
+        <option value="moving">Stops</option>
+        <option value="cadence">Cadence</option>
+      </select>
+    </label>
+  </div>
+  <div class="control legend-control">
+    <div id="legend" class="legend vertical" style="display:none"></div>
+  </div>
+</section>
+{{end}}

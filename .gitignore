@@ -19,9 +19,6 @@ vendor/
 go.work
 go.work.sum
 
-# Go modules
-go.sum
-
 # IDE/editor files
 .idea/
 .vscode/
@@ -30,6 +27,7 @@ go.sum
 # Environment files
 .env
 .env.*
+!.env.example
 
 # OS generated files
 .DS_Store

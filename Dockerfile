@@ -7,7 +7,7 @@ RUN apk add --no-cache git
 # Set working directory
 WORKDIR /build
 
-# Copy go mod files
+# Copy go module files first so dependencies are cached
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -31,13 +31,8 @@ COPY --from=builder /build/b11k .
 # Copy web templates and static files
 COPY --from=builder /build/web ./web
 
-# Copy config.yaml if it exists (user should mount their own config.yaml at runtime)
-# Note: config.yaml is typically mounted as a volume, but we copy it here if available
-COPY --from=builder /build/config.yaml* ./
-
 # Expose web port (default 8080, configurable via config.yaml)
 EXPOSE 8080
 
 # Run the application
 CMD ["./b11k"]
-

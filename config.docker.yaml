@@ -1,0 +1,10 @@
+# Non-secret defaults for Docker Compose. Sensitive values are supplied via .env.
+pg_ip: b11k-postgis
+pg_port: 5432
+pg_db: b11k_db
+pg_user: b11k
+web_host: localhost
+web_port: 8080
+web_protocol: http
+dev_reload_templates: false
+mobile_activity_order: stats_first

@@ -27,6 +27,36 @@ For detailed installation instructions, including PostgreSQL setup, configuratio
 
 ## Quick Start
 
+### Docker Compose
+
+The Compose stack runs the web app and its own PostGIS database. PostgreSQL is exposed on host port `25432` to avoid colliding with common local Postgres containers.
+
+```bash
+cp .env.example .env
+# Edit .env with Strava, Mapbox, and database secret values.
+docker compose up --build
+```
+
+Open `http://localhost:8080`.
+
+### Local Live Testing
+
+Use the live stack while editing UI, templates, or Go code. It starts PostGIS and runs the app from the current checkout instead of from a baked image.
+
+```bash
+./live-test.sh
+```
+
+This creates `.env` from `.env.example` if it does not exist, starts the web UI at `http://localhost:8080`, and exposes PostGIS on `localhost:25432`. CSS and JavaScript changes are served from disk immediately. Template changes apply on browser refresh because live mode enables `B11K_DEV_RELOAD_TEMPLATES=true`. Go code changes require restarting the app container, for example:
+
+```bash
+docker compose -f docker-compose.live.yml restart b11k-live-app
+```
+
+For narrow screens, activity and segment detail pages default to showing stats and graphs before the map. Set `B11K_MOBILE_ACTIVITY_ORDER=map_first` in `.env` if you want the map first instead.
+
+### Local Run
+
 1. **Set up PostgreSQL database** (see [INSTALL.md](INSTALL.md#setting-up-postgresql-database))
 2. **Create `config.yaml`** (see [INSTALL.md](INSTALL.md#configuration))
 3. **Build the application** (see [INSTALL.md](INSTALL.md#building))
@@ -89,4 +119,3 @@ go run ./cmd -setup-db
 ## License
 
 See [LICENSE](LICENSE) file for details.
-

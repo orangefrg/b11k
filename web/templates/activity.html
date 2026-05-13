@@ -15,31 +15,31 @@
 </head>
 <body class="app">
   {{template "topbar" .}}
-  <div class="wrap">
-    <div style="flex: 1; display: flex; flex-direction: column; height: calc(100vh - 60px); min-height: 0; overflow: hidden;">
+  <main class="detail-layout mobile-order-{{.MobileActivityOrder}}">
+    <section class="detail-main">
       {{template "map" .}}
       {{template "graph" .}}
-    </div>
+    </section>
     {{template "activity_sidebar" .}}
-  </div>
+  </main>
 
   <!-- Segment creation modal -->
-  <div id="segment-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
-    <div style="background:var(--panel); padding:24px; border-radius:8px; max-width:500px; width:90%;">
-      <h3 style="margin-top:0;">Create Segment</h3>
-      <p id="segment-selection-info" style="margin:12px 0;">Click two points on the map to select a segment.</p>
+  <div id="segment-modal" class="modal" style="display:none;">
+    <div class="modal-panel">
+      <h3 class="modal-title">Create Segment</h3>
+      <p id="segment-selection-info" class="modal-copy">Click two points on the map to select a segment.</p>
       <form id="segment-form">
-        <div style="margin-bottom:12px;">
-          <label style="display:block; margin-bottom:4px;">Name: <span style="color:#e74c3c;">*</span></label>
-          <input type="text" id="segment-name" required style="width:100%; padding:8px; box-sizing:border-box;" />
+        <div class="field">
+          <label for="segment-name">Name: <span class="required">*</span></label>
+          <input type="text" id="segment-name" required />
         </div>
-        <div style="margin-bottom:12px;">
-          <label style="display:block; margin-bottom:4px;">Description:</label>
-          <textarea id="segment-description" style="width:100%; padding:8px; box-sizing:border-box; min-height:60px;"></textarea>
+        <div class="field">
+          <label for="segment-description">Description:</label>
+          <textarea id="segment-description"></textarea>
         </div>
-        <div style="display:flex; gap:12px; justify-content:flex-end; margin-top:20px;">
-          <button type="button" id="segment-cancel-btn" style="padding:8px 16px;">Cancel</button>
-          <button type="submit" id="segment-submit-btn" style="padding:8px 16px; background:#4cc9f0; color:white; border:none; border-radius:4px; cursor:pointer;">Create</button>
+        <div class="modal-actions">
+          <button type="button" id="segment-cancel-btn">Cancel</button>
+          <button type="submit" id="segment-submit-btn" class="primary-btn">Create</button>
         </div>
       </form>
     </div>
@@ -47,4 +47,3 @@
 </body>
 </html>
 {{end}}
-

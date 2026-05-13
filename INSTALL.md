@@ -135,7 +135,7 @@ Before creating your `config.yaml`, you need to set up a PostgreSQL database. Th
 
 ### Option 2: Using Docker PostgreSQL
 
-If you prefer to run PostgreSQL in Docker:
+If you only want PostgreSQL in Docker:
 
 ```bash
 docker run -d \
@@ -160,7 +160,31 @@ docker exec -it postgres-b11k psql -U b11k -d b11k_db -c "CREATE EXTENSION IF NO
 - **pg_user**: `b11k`
 - **pg_secret**: `your_password`
 
-### Option 3: Using Existing PostgreSQL Server
+### Option 3: Full Docker Compose Stack
+
+The included Compose stack runs both the b11k web app and a dedicated PostGIS database. It does not use a generic `postgres` service name, and the database is exposed on host port `25432` so it can coexist with other local PostgreSQL containers.
+
+1. Create your environment file:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Edit `.env` with your secrets:
+   - `B11K_STRAVA_CLIENT_ID`
+   - `B11K_STRAVA_CLIENT_SECRET`
+   - `B11K_MAPBOX_TOKEN`
+   - `B11K_PG_PASSWORD`
+
+3. Start the stack:
+   ```bash
+   docker compose up --build
+   ```
+
+4. Open `http://localhost:8080`.
+
+The app container mounts `config.docker.yaml` as `/app/config.yaml` for non-secret defaults. Sensitive values come from `.env` through `B11K_*` environment variables.
+
+### Option 4: Using Existing PostgreSQL Server
 
 If you have an existing PostgreSQL server:
 
@@ -196,19 +220,21 @@ cp config.yaml.template config.yaml
 Create a new file named `config.yaml` in the project root with the following content:
 
 ```yaml
-strava_client_id: your_strava_client_id
-strava_client_secret: your_strava_client_secret
+strava_client_id: ""  # Prefer B11K_STRAVA_CLIENT_ID in .env
+strava_client_secret: ""  # Prefer B11K_STRAVA_CLIENT_SECRET in .env
 # strava_redirect_uri: http://localhost:8080/strava/callback  # Optional: auto-constructed from web_protocol, web_host and web_port if not provided
-mapbox_token: your_mapbox_token
+mapbox_token: ""  # Prefer B11K_MAPBOX_TOKEN in .env
 pg_ip: localhost
 pg_port: 5432
 pg_db: b11k_db
 pg_user: b11k
-pg_secret: your_password
+pg_secret: ""  # Prefer B11K_PG_PASSWORD in .env
 web_host: localhost  # Hostname or IP address for the web server (default: localhost)
 web_port: 8080
 web_protocol: http  # "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy with HTTPS termination
 ```
+
+Secrets can be provided through environment variables instead of `config.yaml`. The app reads `config.yaml` first, then applies any `B11K_*` environment overrides.
 
 #### Configuration Fields
 
@@ -512,4 +538,3 @@ Then run:
 ```bash
 docker-compose up -d
 ```
-

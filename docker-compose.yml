@@ -1,0 +1,45 @@
+services:
+  b11k-postgis:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${B11K_PG_DATABASE:-b11k_db}
+      POSTGRES_USER: ${B11K_PG_USER:-b11k}
+      POSTGRES_PASSWORD: ${B11K_PG_PASSWORD:?Set B11K_PG_PASSWORD in .env}
+    ports:
+      - "${B11K_PG_HOST_PORT:-25432}:5432"
+    volumes:
+      - b11k-postgis-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  b11k-app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      b11k-postgis:
+        condition: service_healthy
+    environment:
+      B11K_STRAVA_CLIENT_ID: ${B11K_STRAVA_CLIENT_ID:-}
+      B11K_STRAVA_CLIENT_SECRET: ${B11K_STRAVA_CLIENT_SECRET:-}
+      B11K_STRAVA_REDIRECT_URI: ${B11K_STRAVA_REDIRECT_URI:-}
+      B11K_MAPBOX_TOKEN: ${B11K_MAPBOX_TOKEN:-}
+      B11K_PG_HOST: b11k-postgis
+      B11K_PG_PORT: "5432"
+      B11K_PG_DATABASE: ${B11K_PG_DATABASE:-b11k_db}
+      B11K_PG_USER: ${B11K_PG_USER:-b11k}
+      B11K_PG_PASSWORD: ${B11K_PG_PASSWORD:?Set B11K_PG_PASSWORD in .env}
+      B11K_WEB_HOST: ${B11K_WEB_HOST:-localhost}
+      B11K_WEB_PORT: "8080"
+      B11K_WEB_PROTOCOL: ${B11K_WEB_PROTOCOL:-http}
+      B11K_MOBILE_ACTIVITY_ORDER: ${B11K_MOBILE_ACTIVITY_ORDER:-stats_first}
+    ports:
+      - "${B11K_WEB_HOST_PORT:-8080}:8080"
+    volumes:
+      - ./config.docker.yaml:/app/config.yaml:ro
+
+volumes:
+  b11k-postgis-data:

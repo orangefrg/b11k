@@ -1,4 +1,21 @@
 {{define "map"}}
-<div id="map" style="flex: 1; min-height: 0; position: relative;"></div>
+<section class="map-shell">
+  <div id="map" class="map-panel"></div>
+  {{template "color_controls" .}}
+  <section id="segment-create-panel" class="segment-create-panel" aria-live="polite" hidden>
+    <div class="segment-picker-head">
+      <div>
+        <div class="segment-picker-label">Segment builder</div>
+        <div id="segment-step-title" class="segment-picker-title">Select start</div>
+      </div>
+      <button id="segment-exit-btn" type="button" class="ghost-btn">Exit</button>
+    </div>
+    <p id="segment-step-copy" class="segment-picker-copy">Tap the route where the segment should begin.</p>
+    <div id="segment-summary" class="segment-summary" hidden></div>
+    <div class="segment-picker-actions">
+      <button id="segment-reset-btn" type="button">Reset</button>
+      <button id="segment-save-panel-btn" type="button" class="primary-btn" hidden>Name segment</button>
+    </div>
+  </section>
+</section>
 {{end}}
-

@@ -283,6 +283,8 @@ func createSegmentActivityMatchesTable(ctx context.Context, conn *pgx.Conn) erro
 		avg_speed DOUBLE PRECISION,
 		distance_m DOUBLE PRECISION,
 		elevation_gain_m DOUBLE PRECISION,
+		elapsed_seconds DOUBLE PRECISION,
+		direction_checked BOOLEAN NOT NULL DEFAULT TRUE,
 		cached_at TIMESTAMPTZ DEFAULT NOW(),
 		PRIMARY KEY (segment_id, activity_id, tolerance_meters)
 	)`
@@ -316,6 +318,18 @@ func createHelperFunctions(ctx context.Context, conn *pgx.Conn) error {
 		return nil
 	}
 	log.Printf("✅ PostGIS version: %s", postgisVersion)
+
+	dropHelperQueries := []string{
+		"DROP FUNCTION IF EXISTS find_route_parts_matching_segment(BIGINT, DOUBLE PRECISION)",
+		"DROP FUNCTION IF EXISTS find_route_parts_matching_segment_by_name(TEXT, DOUBLE PRECISION)",
+		"DROP FUNCTION IF EXISTS find_segment_point_indices(BIGINT, BIGINT, BIGINT, DOUBLE PRECISION)",
+		"DROP FUNCTION IF EXISTS get_activity_segment_metrics(BIGINT, BIGINT, BIGINT, DOUBLE PRECISION)",
+	}
+	for _, dropQuery := range dropHelperQueries {
+		if _, err := conn.Exec(ctx, dropQuery); err != nil {
+			return fmt.Errorf("failed to drop helper function: %w", err)
+		}
+	}
 
 	helperQueries := []string{
 		// Make route geography from longitude and latitude
@@ -455,6 +469,12 @@ func createHelperFunctions(ctx context.Context, conn *pgx.Conn) error {
 			segment_check AS (
 				SELECT COUNT(*) AS cnt FROM segment_data
 			),
+			segment_endpoints AS (
+				SELECT
+					ST_StartPoint(segment_geog::geometry)::geography AS start_geog,
+					ST_EndPoint(segment_geog::geometry)::geography AS end_geog
+				FROM segment_data
+			),
 			-- Initial filter: activities that have any part within tolerance
 			candidate_activities AS (
 				SELECT DISTINCT a.activity_id
@@ -464,19 +484,45 @@ func createHelperFunctions(ctx context.Context, conn *pgx.Conn) error {
 				WHERE sc.cnt > 0  -- Only proceed if segment exists
 				  AND ST_DWithin(a.route_geog, sd.segment_geog, p_tolerance_meters)
 			),
+			direction_matches AS (
+				SELECT
+					ca.activity_id,
+					start_point.point_index AS start_index,
+					end_point.point_index AS end_index,
+					GREATEST(start_point.dist, end_point.dist) AS endpoint_distance
+				FROM candidate_activities ca
+				CROSS JOIN segment_endpoints se
+				CROSS JOIN LATERAL (
+					SELECT ps.point_index, ST_Distance(ps.location, se.start_geog) AS dist
+					FROM point_samples ps
+					WHERE ps.activity_id = ca.activity_id
+					ORDER BY dist
+					LIMIT 1
+				) start_point
+				CROSS JOIN LATERAL (
+					SELECT ps.point_index, ST_Distance(ps.location, se.end_geog) AS dist
+					FROM point_samples ps
+					WHERE ps.activity_id = ca.activity_id
+					ORDER BY dist
+					LIMIT 1
+				) end_point
+				WHERE start_point.dist <= p_tolerance_meters
+				  AND end_point.dist <= p_tolerance_meters
+				  AND start_point.point_index < end_point.point_index
+			),
 			-- Check if all segment points are within tolerance of the activity route
 			-- This ensures the segment geometry matches (allows deviations along route)
 			segment_point_checks AS (
 				SELECT 
-					ca.activity_id,
+					dm.activity_id,
 					sp.point_geog,
 					ST_Distance(sp.point_geog, a.route_geog) AS point_dist
-				FROM candidate_activities ca
+				FROM direction_matches dm
 				CROSS JOIN segment_data sd
 				CROSS JOIN LATERAL (
 					SELECT (ST_DumpPoints(sd.segment_geog::geometry)).geom::geography AS point_geog
 				) sp
-				INNER JOIN activity_geometries a ON a.activity_id = ca.activity_id
+				INNER JOIN activity_geometries a ON a.activity_id = dm.activity_id
 			),
 			-- Group by activity and check if all segment points are within tolerance
 			activity_geometry_matches AS (
@@ -494,7 +540,7 @@ func createHelperFunctions(ctx context.Context, conn *pgx.Conn) error {
 			overlap_calc AS (
 				SELECT 
 					agm.activity_id,
-					agm.max_point_distance AS min_distance_m,
+					GREATEST(agm.max_point_distance, dm.endpoint_distance) AS min_distance_m,
 					-- Calculate overlap length using intersection with buffer
 					-- This gives us the length of the activity route that overlaps with the segment
 					ST_Length(
@@ -504,6 +550,7 @@ func createHelperFunctions(ctx context.Context, conn *pgx.Conn) error {
 						)
 					) AS overlap_length_m
 				FROM activity_geometry_matches agm
+				INNER JOIN direction_matches dm ON dm.activity_id = agm.activity_id
 				CROSS JOIN segment_data sd
 				INNER JOIN activity_geometries a ON a.activity_id = agm.activity_id
 			)
@@ -544,32 +591,71 @@ func createHelperFunctions(ctx context.Context, conn *pgx.Conn) error {
 				WHERE name = p_segment_name
 			),
 			q AS (
-				SELECT id, name, segment_geog AS line, segment_length, p_tolerance_meters AS tol
+				SELECT
+					id,
+					name,
+					segment_geog AS line,
+					segment_length,
+					ST_StartPoint(segment_geog::geometry)::geography AS start_geog,
+					ST_EndPoint(segment_geog::geometry)::geography AS end_geog,
+					p_tolerance_meters AS tol
 				FROM segment_data
+			),
+			directed AS (
+				SELECT
+					a.activity_id,
+					q.id,
+					q.name,
+					q.line,
+					q.segment_length,
+					q.tol,
+					start_point.point_index AS start_index,
+					end_point.point_index AS end_index,
+					GREATEST(start_point.dist, end_point.dist) AS endpoint_distance
+				FROM activity_geometries a
+				CROSS JOIN q
+				CROSS JOIN LATERAL (
+					SELECT ps.point_index, ST_Distance(ps.location, q.start_geog) AS dist
+					FROM point_samples ps
+					WHERE ps.activity_id = a.activity_id
+					ORDER BY dist
+					LIMIT 1
+				) start_point
+				CROSS JOIN LATERAL (
+					SELECT ps.point_index, ST_Distance(ps.location, q.end_geog) AS dist
+					FROM point_samples ps
+					WHERE ps.activity_id = a.activity_id
+					ORDER BY dist
+					LIMIT 1
+				) end_point
+				WHERE ST_DWithin(a.route_geog, q.line, q.tol)
+				  AND start_point.dist <= q.tol
+				  AND end_point.dist <= q.tol
+				  AND start_point.point_index < end_point.point_index
 			)
 			SELECT
-				a.activity_id,
-				q.id AS segment_id,
-				q.name AS segment_name,
-				ST_Distance(a.route_geog, q.line) AS min_distance_m,
+				d.activity_id,
+				d.id AS segment_id,
+				d.name AS segment_name,
+				d.endpoint_distance AS min_distance_m,
 				ST_Length(
 					ST_Intersection(
-						ST_Buffer(a.route_geog::geometry, q.tol)::geography,
-						q.line
+						ST_Buffer(a.route_geog::geometry, d.tol)::geography,
+						d.line
 					)
 				) AS overlap_length_m,
 				CASE 
-					WHEN q.segment_length > 0 THEN
+					WHEN d.segment_length > 0 THEN
 						ST_Length(
 							ST_Intersection(
-								ST_Buffer(a.route_geog::geometry, q.tol)::geography,
-								q.line
+								ST_Buffer(a.route_geog::geometry, d.tol)::geography,
+								d.line
 							)
-						) / q.segment_length * 100.0
+						) / d.segment_length * 100.0
 					ELSE 0.0
 				END AS overlap_percentage
-			FROM activity_geometries a, q
-			WHERE ST_DWithin(a.route_geog, q.line, q.tol)
+			FROM directed d
+			INNER JOIN activity_geometries a ON a.activity_id = d.activity_id
 			ORDER BY min_distance_m, overlap_percentage DESC;
 			$$;`,
 		// Find point indices for segment portion in an activity
@@ -585,26 +671,37 @@ func createHelperFunctions(ctx context.Context, conn *pgx.Conn) error {
 		)
 		LANGUAGE SQL STABLE AS
 		$$
-		WITH segment_line AS (
-			SELECT segment_geog AS line, p_tolerance_meters AS tol
+		WITH segment_endpoints AS (
+			SELECT
+				ST_StartPoint(segment_geog::geometry)::geography AS start_geog,
+				ST_EndPoint(segment_geog::geometry)::geography AS end_geog,
+				p_tolerance_meters AS tol
 			FROM favorite_segments
 			WHERE id = p_segment_id
 		),
-		activity_points AS (
-			SELECT 
-				point_index,
-				location,
-				ST_Distance(location, sl.line) AS dist
-			FROM point_samples ps, segment_line sl
+		start_point AS (
+			SELECT ps.point_index, ST_Distance(ps.location, se.start_geog) AS dist
+			FROM point_samples ps, segment_endpoints se
 			WHERE ps.activity_id = p_activity_id 
 			  AND ps.athlete_id = p_athlete_id
-			  AND ST_DWithin(ps.location, sl.line, sl.tol)
-			ORDER BY point_index
+			ORDER BY dist
+			LIMIT 1
+		),
+		end_point AS (
+			SELECT ps.point_index, ST_Distance(ps.location, se.end_geog) AS dist
+			FROM point_samples ps, segment_endpoints se
+			WHERE ps.activity_id = p_activity_id 
+			  AND ps.athlete_id = p_athlete_id
+			ORDER BY dist
+			LIMIT 1
 		)
 		SELECT 
-			MIN(point_index)::INTEGER AS start_index,
-			MAX(point_index)::INTEGER AS end_index
-		FROM activity_points;
+			sp.point_index::INTEGER AS start_index,
+			ep.point_index::INTEGER AS end_index
+		FROM start_point sp, end_point ep, segment_endpoints se
+		WHERE sp.dist <= se.tol
+		  AND ep.dist <= se.tol
+		  AND sp.point_index < ep.point_index;
 		$$;`,
 		// Get segment metrics (distance, elevation gain)
 		`CREATE OR REPLACE FUNCTION get_segment_metrics(
@@ -633,28 +730,29 @@ func createHelperFunctions(ctx context.Context, conn *pgx.Conn) error {
 			avg_hr DOUBLE PRECISION,
 			avg_speed DOUBLE PRECISION,
 			distance_m DOUBLE PRECISION,
-			elevation_gain_m DOUBLE PRECISION
+			elevation_gain_m DOUBLE PRECISION,
+			elapsed_seconds DOUBLE PRECISION
 		)
 		LANGUAGE SQL STABLE AS
 		$$
-		WITH segment_line AS (
-			SELECT segment_geog AS line, p_tolerance_meters AS tol
-			FROM favorite_segments
-			WHERE id = p_segment_id
+		WITH segment_indices AS (
+			SELECT start_index, end_index
+			FROM find_segment_point_indices(p_segment_id, p_activity_id, p_athlete_id, p_tolerance_meters)
 		),
 		segment_points AS (
 			SELECT 
 				ps.point_index,
+				ps.time,
 				ps.heartrate,
 				ps.speed,
 				ps.altitude,
 				ps.location,
 				LAG(ps.altitude) OVER (ORDER BY ps.point_index) AS prev_altitude,
 				LAG(ps.location) OVER (ORDER BY ps.point_index) AS prev_location
-			FROM point_samples ps, segment_line sl
+			FROM point_samples ps, segment_indices si
 			WHERE ps.activity_id = p_activity_id 
 			  AND ps.athlete_id = p_athlete_id
-			  AND ST_DWithin(ps.location, sl.line, sl.tol)
+			  AND ps.point_index BETWEEN si.start_index AND si.end_index
 			ORDER BY ps.point_index
 		),
 		segment_metrics AS (
@@ -675,14 +773,16 @@ func createHelperFunctions(ctx context.Context, conn *pgx.Conn) error {
 						THEN ST_Distance(location, prev_location)
 						ELSE 0
 					END
-				) AS distance_m
+				) AS distance_m,
+				EXTRACT(EPOCH FROM (MAX(time) - MIN(time))) AS elapsed_seconds
 			FROM segment_points
 		)
 		SELECT 
 			COALESCE((SELECT avg_hr FROM segment_metrics), 0.0) AS avg_hr,
 			COALESCE((SELECT avg_speed FROM segment_metrics), 0.0) AS avg_speed,
 			COALESCE((SELECT distance_m FROM segment_metrics), 0.0) AS distance_m,
-			COALESCE((SELECT elevation_gain FROM segment_metrics), 0.0) AS elevation_gain_m
+			COALESCE((SELECT elevation_gain FROM segment_metrics), 0.0) AS elevation_gain_m,
+			COALESCE((SELECT elapsed_seconds FROM segment_metrics), 0.0) AS elapsed_seconds
 		FROM (SELECT 1) AS dummy;
 		$$;`,
 	}
@@ -1145,6 +1245,8 @@ func GetExpectedTableSchemas() []TableSchema {
 				{Name: "avg_speed", Type: "double precision", Nullable: true},
 				{Name: "distance_m", Type: "double precision", Nullable: true},
 				{Name: "elevation_gain_m", Type: "double precision", Nullable: true},
+				{Name: "elapsed_seconds", Type: "double precision", Nullable: true},
+				{Name: "direction_checked", Type: "boolean", Nullable: false},
 				{Name: "cached_at", Type: "timestamp with time zone", Nullable: true},
 			},
 			Indexes: []string{

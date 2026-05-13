@@ -16,14 +16,13 @@
 </head>
 <body class="app">
   {{template "topbar" .}}
-  <div class="wrap">
-    <div style="flex: 1; display: flex; flex-direction: column; height: calc(100vh - 60px); min-height: 0; overflow: hidden;">
+  <main class="detail-layout mobile-order-{{.MobileActivityOrder}}">
+    <section class="detail-main">
       {{template "map" .}}
       {{template "graph" .}}
-    </div>
+    </section>
     {{template "segment_sidebar" .}}
-  </div>
+  </main>
 </body>
 </html>
 {{end}}
-
