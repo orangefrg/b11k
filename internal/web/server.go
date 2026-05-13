@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	syncpkg "sync"
@@ -88,6 +89,7 @@ func RunServer(ctx context.Context, cfg Config) {
 	http.HandleFunc("/api/segments/", s.handleSegmentAPI)
 	http.HandleFunc("/segments", s.handleSegmentsPage)
 	http.HandleFunc("/segment/", s.handleSegmentPage)
+	http.HandleFunc("/profile", s.handleProfilePage)
 
 	// static
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(filepath.FromSlash("web/static")))))
@@ -122,6 +124,7 @@ func parseTemplates() (*template.Template, error) {
 		filepath.FromSlash("web/templates/activity.html"),
 		filepath.FromSlash("web/templates/segments.html"),
 		filepath.FromSlash("web/templates/segment.html"),
+		filepath.FromSlash("web/templates/profile.html"),
 		filepath.FromSlash("web/templates/partials/topbar.html"),
 		filepath.FromSlash("web/templates/partials/map.html"),
 		filepath.FromSlash("web/templates/partials/graph.html"),
@@ -144,17 +147,209 @@ func (s *server) executeTemplate(w http.ResponseWriter, name string, data interf
 	return tmpl.ExecuteTemplate(w, name, data)
 }
 
+func (s *server) withDB(op func(*pgx.Conn) error) error {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+
+	err := op(s.conn)
+	if err == nil {
+		return nil
+	}
+	if !isRecoverableDBError(err) {
+		return err
+	}
+
+	log.Printf("⚠️ Database connection looked busy/stale, reconnecting: %v", err)
+	if recErr := s.reconnectDBLocked(); recErr != nil {
+		return fmt.Errorf("database recovery failed after %v: %w", err, recErr)
+	}
+
+	if retryErr := op(s.conn); retryErr != nil {
+		return retryErr
+	}
+	log.Printf("✅ Database connection recovered")
+	return nil
+}
+
+func (s *server) reconnectDBLocked() error {
+	if s.conn != nil {
+		_ = s.conn.Close(context.Background())
+	}
+
+	ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
+	defer cancel()
+
+	conn, err := pggeo.Connect(ctx, s.cfg.PGUser, s.cfg.PGPassword, s.cfg.PGIP, s.cfg.PGPort, s.cfg.PGDatabase)
+	if err != nil {
+		return err
+	}
+	if err := pggeo.ValidateAndMigrateSchema(ctx, conn, false); err != nil {
+		_ = conn.Close(context.Background())
+		return err
+	}
+	s.conn = conn
+	return nil
+}
+
+func isRecoverableDBError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	recoverableFragments := []string{
+		"conn busy",
+		"failed to deallocate cached statement",
+		"conn closed",
+		"closed connection",
+		"connection reset",
+		"broken pipe",
+	}
+	for _, fragment := range recoverableFragments {
+		if strings.Contains(msg, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *server) renderDatabaseBusy(w http.ResponseWriter, r *http.Request, err error) {
+	log.Printf("⚠️ Database still recovering for %s: %v", r.URL.Path, err)
+	w.Header().Set("Retry-After", "2")
+	if strings.HasPrefix(r.URL.Path, "/api/") || strings.Contains(r.Header.Get("Accept"), "application/json") {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":               "Database is recovering. Please retry shortly.",
+			"retry_after_seconds": 2,
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="2">
+  <title>B11K is recovering</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #0d1117;
+      color: #eef2f5;
+      font: 16px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      width: min(520px, calc(100vw - 40px));
+      border: 1px solid #2b3442;
+      border-radius: 8px;
+      background: #151a22;
+      padding: 28px;
+      box-shadow: 0 18px 60px rgba(0,0,0,.32);
+    }
+    h1 { margin: 0 0 10px; font-size: clamp(28px, 7vw, 42px); line-height: 1.1; }
+    p { margin: 0 0 14px; color: rgba(238,242,245,.72); }
+    .bar {
+      height: 4px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #253043;
+    }
+    .bar::before {
+      content: "";
+      display: block;
+      width: 38%;
+      height: 100%;
+      border-radius: inherit;
+      background: #9bd3ff;
+      animation: busy 1.1s ease-in-out infinite alternate;
+    }
+    @keyframes busy { from { transform: translateX(0); } to { transform: translateX(164%); } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Reconnecting database</h1>
+    <p>The database connection got busy, so B11K is reconnecting. This page will retry automatically in a moment.</p>
+    <div class="bar" aria-hidden="true"></div>
+  </main>
+</body>
+</html>`))
+}
+
+func (s *server) handleDBPageError(w http.ResponseWriter, r *http.Request, err error, fallbackStatus int) {
+	if isRecoverableDBError(err) {
+		s.renderDatabaseBusy(w, r, err)
+		return
+	}
+	http.Error(w, err.Error(), fallbackStatus)
+}
+
+func (s *server) ensureSessionFromRequest(r *http.Request) {
+	if s.token == "" {
+		if cookie, err := r.Cookie(stravaTokenCookieName); err == nil {
+			s.token = cookie.Value
+		}
+	}
+	if s.user == nil && s.token != "" {
+		if a, err := strava.FetchCurrentAthlete(s.token); err == nil {
+			s.user = a
+		} else {
+			log.Printf("⚠️ Failed to fetch current athlete: %v", err)
+		}
+	}
+}
+
+func (s *server) enrichGearNames(activities []strava.ActivitySummary) []strava.ActivitySummary {
+	if s.token == "" || s.user == nil {
+		return activities
+	}
+
+	seen := make(map[string]*string)
+	for i := range activities {
+		gearID := strings.TrimSpace(activities[i].GearID)
+		if gearID == "" || activities[i].GearName != nil {
+			continue
+		}
+		if cached, ok := seen[gearID]; ok {
+			activities[i].GearName = cached
+			continue
+		}
+
+		gear, err := strava.FetchGear(s.token, gearID)
+		if err != nil || gear == nil || strings.TrimSpace(gear.Name) == "" {
+			if err != nil {
+				log.Printf("⚠️ Failed to fetch gear %s: %v", gearID, err)
+			}
+			seen[gearID] = nil
+			continue
+		}
+
+		name := strings.TrimSpace(gear.Name)
+		activities[i].GearName = &name
+		seen[gearID] = &name
+		if err := s.withDB(func(conn *pgx.Conn) error {
+			return pggeo.UpdateGearNameForGearID(s.ctx, conn, s.user.ID, gearID, name)
+		}); err != nil {
+			log.Printf("⚠️ Failed to cache gear name for %s: %v", gearID, err)
+		}
+	}
+	return activities
+}
+
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
 	// Check for token in cookie if not in memory
-	if s.token == "" {
-		if cookie, err := r.Cookie(stravaTokenCookieName); err == nil {
-			s.token = cookie.Value
-		}
-	}
+	s.ensureSessionFromRequest(r)
 	s.renderActivitiesPageWithReq(w, r)
 }
 
@@ -164,15 +359,13 @@ func (s *server) handleStravaHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Check for token in cookie if not in memory
-	if s.token == "" {
-		if cookie, err := r.Cookie(stravaTokenCookieName); err == nil {
-			s.token = cookie.Value
-		}
-	}
+	s.ensureSessionFromRequest(r)
 	s.renderActivitiesPageWithReq(w, r)
 }
 
 func (s *server) renderActivitiesPageWithReq(w http.ResponseWriter, r *http.Request) {
+	s.ensureSessionFromRequest(r)
+
 	// pagination params
 	page := 1
 	perPage := 20
@@ -190,21 +383,16 @@ func (s *server) renderActivitiesPageWithReq(w http.ResponseWriter, r *http.Requ
 	var activities []strava.ActivitySummary
 	var err error
 	if s.user != nil {
-		activities, err = pggeo.GetAllActivities(s.ctx, s.conn, s.user.ID)
+		err = s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			activities, dbErr = pggeo.GetAllActivities(s.ctx, conn, s.user.ID)
+			return dbErr
+		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
 		}
-	}
-
-	// ensure token from cookie and athlete profile loaded for header
-	if s.token == "" {
-		// this function doesn't have *http.Request*, but callers already populated s.token via cookie where possible
-	}
-	if s.user == nil && s.token != "" {
-		if a, err := strava.FetchCurrentAthlete(s.token); err == nil {
-			s.user = a
-		}
+		activities = s.enrichGearNames(activities)
 	}
 
 	// paginate in-memory for now
@@ -287,13 +475,37 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activity, err := pggeo.GetActivityByID(s.ctx, s.conn, s.user.ID, activityID)
+	var activity *strava.ActivitySummary
+	err = s.withDB(func(conn *pgx.Conn) error {
+		var dbErr error
+		activity, dbErr = pggeo.GetActivityByID(s.ctx, conn, s.user.ID, activityID)
+		return dbErr
+	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		s.handleDBPageError(w, r, err, http.StatusNotFound)
 		return
+	}
+	enriched := s.enrichGearNames([]strava.ActivitySummary{*activity})
+	if len(enriched) > 0 {
+		activity = &enriched[0]
+	}
+
+	var activityHRZones []pggeo.HRZoneDistribution
+	if s.token != "" {
+		if zones, err := strava.FetchHeartRateZones(s.token); err == nil && zones != nil {
+			err = s.withDB(func(conn *pgx.Conn) error {
+				var dbErr error
+				activityHRZones, dbErr = pggeo.GetHRZoneDistributionForActivity(s.ctx, conn, s.user.ID, activityID, &zones.HeartRate)
+				return dbErr
+			})
+			if err != nil {
+				log.Printf("⚠️ Failed to calculate activity HR zones for %d: %v", activityID, err)
+			}
+		}
 	}
 	data := struct {
 		Activity            strava.ActivitySummary
+		ActivityHRZones     []pggeo.HRZoneDistribution
 		MapboxToken         string
 		Athlete             *strava.Athlete
 		ShowLoginCTA        bool
@@ -301,6 +513,7 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		MobileActivityOrder string
 	}{
 		Activity:            *activity,
+		ActivityHRZones:     activityHRZones,
 		MapboxToken:         s.cfg.MapboxToken,
 		Athlete:             s.user,
 		ShowLoginCTA:        s.token == "" && s.cfg.StravaClientID != "",
@@ -322,11 +535,17 @@ func (s *server) handleActivitiesAPI(w http.ResponseWriter, r *http.Request) {
 
 	end := time.Now()
 	start := end.AddDate(0, 0, -180)
-	activities, err := pggeo.GetActivitiesByDateRange(s.ctx, s.conn, s.user.ID, start, end)
+	var activities []strava.ActivitySummary
+	err := s.withDB(func(conn *pgx.Conn) error {
+		var dbErr error
+		activities, dbErr = pggeo.GetActivitiesByDateRange(s.ctx, conn, s.user.ID, start, end)
+		return dbErr
+	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 		return
 	}
+	activities = s.enrichGearNames(activities)
 	writeJSON(w, activities)
 }
 
@@ -484,9 +703,14 @@ func (s *server) handleActivityPointsAPI(w http.ResponseWriter, r *http.Request)
 			}
 		}
 
-		graphData, err := pggeo.GetGraphDataForActivity(s.ctx, s.conn, s.user.ID, activityID, metrics, includeZones, hrZones)
+		var graphData *pggeo.GraphData
+		err := s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			graphData, dbErr = pggeo.GetGraphDataForActivity(s.ctx, conn, s.user.ID, activityID, metrics, includeZones, hrZones)
+			return dbErr
+		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, graphData)
@@ -495,9 +719,14 @@ func (s *server) handleActivityPointsAPI(w http.ResponseWriter, r *http.Request)
 
 	// Handle points endpoint
 	if len(parts) == 2 && parts[1] == "points" {
-		samples, err := pggeo.GetPointSamplesForActivity(s.ctx, s.conn, s.user.ID, activityID)
+		var samples []pggeo.PointSample
+		err := s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			samples, dbErr = pggeo.GetPointSamplesForActivity(s.ctx, conn, s.user.ID, activityID)
+			return dbErr
+		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, samples)
@@ -615,9 +844,14 @@ func (s *server) handleSegmentsAPI(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		segments, err := pggeo.ListFavoriteSegments(s.ctx, s.conn, s.user.ID)
+		var segments []pggeo.FavoriteSegment
+		err := s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			segments, dbErr = pggeo.ListFavoriteSegments(s.ctx, conn, s.user.ID)
+			return dbErr
+		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, segments)
@@ -644,9 +878,14 @@ func (s *server) handleSegmentsAPI(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Get point samples for the activity
-		samples, err := pggeo.GetPointSamplesForActivity(s.ctx, s.conn, s.user.ID, req.ActivityID)
+		var samples []pggeo.PointSample
+		err := s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			samples, dbErr = pggeo.GetPointSamplesForActivity(s.ctx, conn, s.user.ID, req.ActivityID)
+			return dbErr
+		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			s.handleDBPageError(w, r, err, http.StatusNotFound)
 			return
 		}
 
@@ -663,9 +902,14 @@ func (s *server) handleSegmentsAPI(w http.ResponseWriter, r *http.Request) {
 			segmentSamples = append(segmentSamples, samples[i])
 		}
 
-		segment, err := pggeo.InsertFavoriteSegment(s.ctx, s.conn, s.user.ID, req.Name, req.Description, latLngData, segmentSamples)
+		var segment *pggeo.FavoriteSegment
+		err = s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			segment, dbErr = pggeo.InsertFavoriteSegment(s.ctx, conn, s.user.ID, req.Name, req.Description, latLngData, segmentSamples)
+			return dbErr
+		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -741,12 +985,15 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			s.connMu.Lock()
-			graphData, err := pggeo.GetGraphDataForSegmentInActivity(s.ctx, s.conn, s.user.ID, activityID, segmentID, metrics, includeZones, hrZones)
-			s.connMu.Unlock()
+			var graphData *pggeo.GraphData
+			err = s.withDB(func(conn *pgx.Conn) error {
+				var dbErr error
+				graphData, dbErr = pggeo.GetGraphDataForSegmentInActivity(s.ctx, conn, s.user.ID, activityID, segmentID, metrics, includeZones, hrZones)
+				return dbErr
+			})
 			if err != nil {
 				log.Printf("❌ Failed to load segment graph data for segment %d activity %d: %v", segmentID, activityID, err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 				return
 			}
 			writeJSON(w, graphData)
@@ -754,13 +1001,13 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		// Handle GET /api/segments/:id/metrics
 		if len(parts) > 1 && parts[1] == "metrics" {
-			s.connMu.Lock()
 			query := `SELECT * FROM get_segment_metrics($1)`
 			var distanceM, elevationGainM float64
-			err := s.conn.QueryRow(s.ctx, query, segmentID).Scan(&distanceM, &elevationGainM)
-			s.connMu.Unlock()
+			err := s.withDB(func(conn *pgx.Conn) error {
+				return conn.QueryRow(s.ctx, query, segmentID).Scan(&distanceM, &elevationGainM)
+			})
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 				return
 			}
 			writeJSON(w, map[string]float64{
@@ -784,9 +1031,12 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Check cache first (with mutex)
-			s.connMu.Lock()
-			cached, err := pggeo.GetCachedSegmentActivityMetrics(s.ctx, s.conn, segmentID, activityID, tolerance)
-			s.connMu.Unlock()
+			var cached *pggeo.SegmentActivityCacheEntry
+			err = s.withDB(func(conn *pgx.Conn) error {
+				var dbErr error
+				cached, dbErr = pggeo.GetCachedSegmentActivityMetrics(s.ctx, conn, segmentID, activityID, tolerance)
+				return dbErr
+			})
 			if err == nil && cached != nil && cached.StartIndex != nil && cached.EndIndex != nil {
 				writeJSON(w, map[string]int{
 					"start_index": *cached.StartIndex,
@@ -796,13 +1046,13 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Calculate if not cached (with mutex)
-			s.connMu.Lock()
 			query := `SELECT * FROM find_segment_point_indices($1, $2, $3, $4)`
 			var startIndex, endIndex int
-			err = s.conn.QueryRow(s.ctx, query, segmentID, activityID, s.user.ID, tolerance).Scan(&startIndex, &endIndex)
-			s.connMu.Unlock()
+			err = s.withDB(func(conn *pgx.Conn) error {
+				return conn.QueryRow(s.ctx, query, segmentID, activityID, s.user.ID, tolerance).Scan(&startIndex, &endIndex)
+			})
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 				return
 			}
 
@@ -828,9 +1078,12 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Check cache first (with mutex)
-			s.connMu.Lock()
-			cached, err := pggeo.GetCachedSegmentActivityMetrics(s.ctx, s.conn, segmentID, activityID, tolerance)
-			s.connMu.Unlock()
+			var cached *pggeo.SegmentActivityCacheEntry
+			err = s.withDB(func(conn *pgx.Conn) error {
+				var dbErr error
+				cached, dbErr = pggeo.GetCachedSegmentActivityMetrics(s.ctx, conn, segmentID, activityID, tolerance)
+				return dbErr
+			})
 			if err == nil && cached != nil && cached.AvgHR != nil && cached.AvgSpeed != nil {
 				distance := 0.0
 				if cached.DistanceM != nil {
@@ -855,11 +1108,11 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Calculate if not cached (with mutex)
-			s.connMu.Lock()
 			query := `SELECT * FROM get_activity_segment_metrics($1, $2, $3, $4)`
 			var avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds float64
-			err = s.conn.QueryRow(s.ctx, query, segmentID, activityID, s.user.ID, tolerance).Scan(&avgHR, &avgSpeed, &distanceM, &elevationGainM, &elapsedSeconds)
-			s.connMu.Unlock()
+			err = s.withDB(func(conn *pgx.Conn) error {
+				return conn.QueryRow(s.ctx, query, segmentID, activityID, s.user.ID, tolerance).Scan(&avgHR, &avgSpeed, &distanceM, &elevationGainM, &elapsedSeconds)
+			})
 			if err != nil {
 				// If no rows returned (no matching points), return zeros
 				writeJSON(w, map[string]float64{
@@ -873,18 +1126,14 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Get indices for caching (with mutex)
-			s.connMu.Lock()
 			var startIndex, endIndex int
 			idxQuery := `SELECT * FROM find_segment_point_indices($1, $2, $3, $4)`
-			if err := s.conn.QueryRow(s.ctx, idxQuery, segmentID, activityID, s.user.ID, tolerance).Scan(&startIndex, &endIndex); err == nil {
-				s.connMu.Unlock()
-				// Cache the metrics (with mutex)
-				s.connMu.Lock()
-				pggeo.CacheSegmentActivityMetrics(s.ctx, s.conn, segmentID, activityID, tolerance, startIndex, endIndex, avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds)
-				s.connMu.Unlock()
-			} else {
-				s.connMu.Unlock()
-			}
+			_ = s.withDB(func(conn *pgx.Conn) error {
+				if err := conn.QueryRow(s.ctx, idxQuery, segmentID, activityID, s.user.ID, tolerance).Scan(&startIndex, &endIndex); err != nil {
+					return err
+				}
+				return pggeo.CacheSegmentActivityMetrics(s.ctx, conn, segmentID, activityID, tolerance, startIndex, endIndex, avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds)
+			})
 
 			writeJSON(w, map[string]float64{
 				"avg_hr":          avgHR,
@@ -910,24 +1159,47 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 				sortBy = "distance" // default
 			}
 
-			s.connMu.Lock()
-			activities, err := pggeo.GetActivitiesForSegment(s.ctx, s.conn, s.user.ID, segmentID, tolerance, sortBy, forceRefresh)
-			s.connMu.Unlock()
+			var activities []pggeo.ActivityWithMatch
+			err := s.withDB(func(conn *pgx.Conn) error {
+				var dbErr error
+				activities, dbErr = pggeo.GetActivitiesForSegment(s.ctx, conn, s.user.ID, segmentID, tolerance, sortBy, forceRefresh)
+				return dbErr
+			})
 			if err != nil {
 				log.Printf("❌ Failed to load activities for segment %d: %v", segmentID, err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 				return
+			}
+			if s.token != "" {
+				if zones, err := strava.FetchHeartRateZones(s.token); err == nil && zones != nil {
+					for i := range activities {
+						activityID := activities[i].ID
+						zoneErr := s.withDB(func(conn *pgx.Conn) error {
+							var dbErr error
+							activities[i].SegmentHRZones, dbErr = pggeo.GetHRZoneDistributionForSegmentInActivity(s.ctx, conn, s.user.ID, activityID, segmentID, tolerance, &zones.HeartRate)
+							return dbErr
+						})
+						if zoneErr != nil {
+							log.Printf("⚠️ Failed to calculate segment HR zones for segment %d activity %d: %v", segmentID, activityID, zoneErr)
+						}
+					}
+				} else if err != nil {
+					log.Printf("⚠️ Failed to fetch HR zones for segment efforts: %v", err)
+				}
 			}
 			writeJSON(w, activities)
 			return
 		}
 		// Regular GET /api/segments/:id
-		s.connMu.Lock()
-		segment, err := pggeo.GetFavoriteSegment(s.ctx, s.conn, segmentID)
-		s.connMu.Unlock()
+		var segment *pggeo.FavoriteSegment
+		err = s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			segment, dbErr = pggeo.GetFavoriteSegment(s.ctx, conn, segmentID)
+			return dbErr
+		})
 		if err != nil {
 			log.Printf("❌ Failed to load segment %d: %v", segmentID, err)
-			http.Error(w, err.Error(), http.StatusNotFound)
+			s.handleDBPageError(w, r, err, http.StatusNotFound)
 			return
 		}
 		// Verify ownership
@@ -938,12 +1210,15 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, segment)
 	case "DELETE":
 		// Verify ownership before deleting
-		s.connMu.Lock()
-		segment, err := pggeo.GetFavoriteSegment(s.ctx, s.conn, segmentID)
-		s.connMu.Unlock()
+		var segment *pggeo.FavoriteSegment
+		err = s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			segment, dbErr = pggeo.GetFavoriteSegment(s.ctx, conn, segmentID)
+			return dbErr
+		})
 		if err != nil {
 			log.Printf("❌ Failed to load segment %d for delete: %v", segmentID, err)
-			http.Error(w, err.Error(), http.StatusNotFound)
+			s.handleDBPageError(w, r, err, http.StatusNotFound)
 			return
 		}
 		if segment.AthleteID != s.user.ID {
@@ -951,12 +1226,12 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.connMu.Lock()
-		err = pggeo.DeleteFavoriteSegment(s.ctx, s.conn, segmentID)
-		s.connMu.Unlock()
+		err = s.withDB(func(conn *pgx.Conn) error {
+			return pggeo.DeleteFavoriteSegment(s.ctx, conn, segmentID)
+		})
 		if err != nil {
 			log.Printf("❌ Failed to delete segment %d: %v", segmentID, err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -984,14 +1259,19 @@ func (s *server) handleSegmentsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	segments, err := pggeo.ListFavoriteSegments(s.ctx, s.conn, s.user.ID)
+	var segments []pggeo.SegmentDashboardSummary
+	err := s.withDB(func(conn *pgx.Conn) error {
+		var dbErr error
+		segments, dbErr = pggeo.ListSegmentDashboardSummaries(s.ctx, conn, s.user.ID, 15.0)
+		return dbErr
+	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 		return
 	}
 
 	data := struct {
-		Segments     []pggeo.FavoriteSegment
+		Segments     []pggeo.SegmentDashboardSummary
 		Athlete      *strava.Athlete
 		ShowLoginCTA bool
 		Authorized   bool
@@ -1040,9 +1320,14 @@ func (s *server) handleSegmentPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get segment
-	segment, err := pggeo.GetFavoriteSegment(s.ctx, s.conn, segmentID)
+	var segment *pggeo.FavoriteSegment
+	err = s.withDB(func(conn *pgx.Conn) error {
+		var dbErr error
+		segment, dbErr = pggeo.GetFavoriteSegment(s.ctx, conn, segmentID)
+		return dbErr
+	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		s.handleDBPageError(w, r, err, http.StatusNotFound)
 		return
 	}
 
@@ -1071,5 +1356,189 @@ func (s *server) handleSegmentPage(w http.ResponseWriter, r *http.Request) {
 	if err := s.executeTemplate(w, "segment.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+}
+
+type profileBikeStat struct {
+	GearID     string
+	Label      string
+	DistanceKM float64
+	Activities int
+}
+
+type profilePeriodStat struct {
+	Label      string
+	Activities int
+}
+
+type profileHRZone struct {
+	Label string
+	Range string
+}
+
+func (s *server) handleProfilePage(w http.ResponseWriter, r *http.Request) {
+	s.ensureSessionFromRequest(r)
+	if s.user == nil {
+		http.Error(w, "Authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	var activities []strava.ActivitySummary
+	err := s.withDB(func(conn *pgx.Conn) error {
+		var dbErr error
+		activities, dbErr = pggeo.GetAllActivities(s.ctx, conn, s.user.ID)
+		return dbErr
+	})
+	if err != nil {
+		s.handleDBPageError(w, r, err, http.StatusInternalServerError)
+		return
+	}
+	activities = s.enrichGearNames(activities)
+
+	var zones []profileHRZone
+	var zonesError string
+	if s.token != "" {
+		athleteZones, err := strava.FetchHeartRateZones(s.token)
+		if err != nil {
+			zonesError = err.Error()
+		} else if athleteZones != nil {
+			for i, zone := range athleteZones.HeartRate.Zones {
+				zones = append(zones, profileHRZone{
+					Label: fmt.Sprintf("Z%d", i+1),
+					Range: formatHRZoneRange(zone),
+				})
+			}
+		}
+	}
+
+	bikeStats, totalBikeKM := buildBikeStats(activities)
+	bestMonth, bestYear := findBusiestPeriods(activities)
+
+	data := struct {
+		Athlete           *strava.Athlete
+		ShowLoginCTA      bool
+		Authorized        bool
+		HRZones           []profileHRZone
+		HRZonesError      string
+		TotalBikeKM       float64
+		TotalActivities   int
+		BikeStats         []profileBikeStat
+		BestMonth         profilePeriodStat
+		BestYear          profilePeriodStat
+		HasRecordedRides  bool
+		HasRecordedMonths bool
+	}{
+		Athlete:           s.user,
+		ShowLoginCTA:      s.token == "" && s.cfg.StravaClientID != "",
+		Authorized:        s.token != "",
+		HRZones:           zones,
+		HRZonesError:      zonesError,
+		TotalBikeKM:       totalBikeKM,
+		TotalActivities:   len(activities),
+		BikeStats:         bikeStats,
+		BestMonth:         bestMonth,
+		BestYear:          bestYear,
+		HasRecordedRides:  len(bikeStats) > 0,
+		HasRecordedMonths: bestMonth.Activities > 0 || bestYear.Activities > 0,
+	}
+
+	if err := s.executeTemplate(w, "profile.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func buildBikeStats(activities []strava.ActivitySummary) ([]profileBikeStat, float64) {
+	byGear := make(map[string]*profileBikeStat)
+	totalKM := 0.0
+	for _, activity := range activities {
+		if !isBikeActivity(activity) {
+			continue
+		}
+		gearID := strings.TrimSpace(activity.GearID)
+		if gearID == "" {
+			gearID = "unknown"
+		}
+		stat := byGear[gearID]
+		if stat == nil {
+			label := gearID
+			if gearID == "unknown" {
+				label = "No bike recorded"
+			} else if activity.GearName != nil && strings.TrimSpace(*activity.GearName) != "" {
+				label = strings.TrimSpace(*activity.GearName)
+			}
+			stat = &profileBikeStat{GearID: gearID, Label: label}
+			byGear[gearID] = stat
+		} else if stat.Label == gearID && activity.GearName != nil && strings.TrimSpace(*activity.GearName) != "" {
+			stat.Label = strings.TrimSpace(*activity.GearName)
+		}
+		distanceKM := activity.Distance / 1000
+		stat.DistanceKM += distanceKM
+		stat.Activities++
+		totalKM += distanceKM
+	}
+
+	stats := make([]profileBikeStat, 0, len(byGear))
+	for _, stat := range byGear {
+		stats = append(stats, *stat)
+	}
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].DistanceKM > stats[j].DistanceKM
+	})
+	return stats, totalKM
+}
+
+func isBikeActivity(activity strava.ActivitySummary) bool {
+	kind := strings.ToLower(activity.Type + " " + activity.SportType)
+	return strings.Contains(kind, "ride") || strings.Contains(kind, "bike") || strings.Contains(kind, "cycling")
+}
+
+func findBusiestPeriods(activities []strava.ActivitySummary) (profilePeriodStat, profilePeriodStat) {
+	months := make(map[string]int)
+	years := make(map[string]int)
+	monthLabels := make(map[string]string)
+
+	for _, activity := range activities {
+		if activity.StartDateTime.IsZero() {
+			continue
+		}
+		monthKey := activity.StartDateTime.Format("2006-01")
+		yearKey := activity.StartDateTime.Format("2006")
+		months[monthKey]++
+		years[yearKey]++
+		monthLabels[monthKey] = activity.StartDateTime.Format("January 2006")
+	}
+
+	bestMonth := profilePeriodStat{}
+	bestMonthKey := ""
+	for key, count := range months {
+		if count > bestMonth.Activities || (count == bestMonth.Activities && key > bestMonthKey) {
+			bestMonth = profilePeriodStat{Label: monthLabels[key], Activities: count}
+			bestMonthKey = key
+		}
+	}
+
+	bestYear := profilePeriodStat{}
+	bestYearKey := ""
+	for key, count := range years {
+		if count > bestYear.Activities || (count == bestYear.Activities && key > bestYearKey) {
+			bestYear = profilePeriodStat{Label: key, Activities: count}
+			bestYearKey = key
+		}
+	}
+
+	return bestMonth, bestYear
+}
+
+func formatHRZoneRange(zone strava.HRZone) string {
+	switch {
+	case zone.Min > 0 && zone.Max > 0:
+		return fmt.Sprintf("%d-%d bpm", zone.Min, zone.Max)
+	case zone.Min > 0:
+		return fmt.Sprintf("%d+ bpm", zone.Min)
+	case zone.Max > 0:
+		return fmt.Sprintf("up to %d bpm", zone.Max)
+	default:
+		return "not set"
 	}
 }

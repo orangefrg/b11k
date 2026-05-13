@@ -60,6 +60,7 @@ type ActivitySummary struct {
 	LocationState      *string    `json:"location_state"`
 	LocationCountry    *string    `json:"location_country"`
 	GearID             string     `json:"gear_id"`
+	GearName           *string    `json:"gear_name,omitempty"`
 	AverageSpeed       float64    `json:"average_speed"`
 	MaxSpeed           float64    `json:"max_speed"`
 	AverageCadence     float64    `json:"average_cadence"`
@@ -76,6 +77,8 @@ type ActivitySummary struct {
 type BikeActivity struct {
 	Summary ActivitySummary
 
+	Gear *Gear `json:"gear"`
+
 	Map struct {
 		Polyline        string `json:"polyline"`
 		SummaryPolyline string `json:"summary_polyline"`
@@ -90,6 +93,11 @@ type BikeActivity struct {
 	CadenceStream   CadenceStream
 	GradeStream     GradeStream
 	MovingStream    MovingStream
+}
+
+type Gear struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type TimeStream struct {
@@ -292,6 +300,9 @@ func (a *ActivitySummaryList) GetDetailedActivities(accessToken string) (BikeAct
 			return nil, fmt.Errorf("failed to unmarshal activity: %v", err)
 		}
 		detailedActivity.Summary = activity
+		if detailedActivity.Gear != nil && detailedActivity.Gear.Name != "" {
+			detailedActivity.Summary.GearName = &detailedActivity.Gear.Name
+		}
 		time.Sleep(100 * time.Millisecond)
 		streamUrl := fmt.Sprintf("https://www.strava.com/api/v3/activities/%d/streams?keys=time,latlng,altitude,heartrate,velocity_smooth,watts,cadence,grade_smooth,moving", activity.ID)
 		req, err = http.NewRequest("GET", streamUrl, nil)

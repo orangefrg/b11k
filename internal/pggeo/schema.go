@@ -110,6 +110,7 @@ func createActivitySummariesTable(ctx context.Context, conn *pgx.Conn) error {
 		location_state TEXT,
 		location_country TEXT,
 		gear_id TEXT,
+		gear_name TEXT,
 		average_speed DOUBLE PRECISION,
 		max_speed DOUBLE PRECISION,
 		average_cadence DOUBLE PRECISION,
@@ -126,6 +127,10 @@ func createActivitySummariesTable(ctx context.Context, conn *pgx.Conn) error {
 	_, err := conn.Exec(ctx, query)
 	if err != nil {
 		return err
+	}
+
+	if _, err := conn.Exec(ctx, "ALTER TABLE activity_summaries ADD COLUMN IF NOT EXISTS gear_name TEXT"); err != nil {
+		return fmt.Errorf("failed to alter activity_summaries: %w", err)
 	}
 
 	indexes := []string{
@@ -239,6 +244,8 @@ func createFavoriteSegmentsTable(ctx context.Context, conn *pgx.Conn) error {
 			GENERATED ALWAYS AS (ST_Envelope(segment_geog::GEOMETRY)) STORED,
 		segment_geog_simplified GEOGRAPHY(LINESTRING, 4326),
 		elevation_gain_m DOUBLE PRECISION,
+		elevation_loss_m DOUBLE PRECISION,
+		net_elevation_m DOUBLE PRECISION,
 		created_at TIMESTAMPTZ DEFAULT NOW(),
 		updated_at TIMESTAMPTZ DEFAULT NOW(),
 		CONSTRAINT segments_has_two_points
@@ -248,6 +255,16 @@ func createFavoriteSegmentsTable(ctx context.Context, conn *pgx.Conn) error {
 	_, err := conn.Exec(ctx, query)
 	if err != nil {
 		return err
+	}
+
+	alterQueries := []string{
+		"ALTER TABLE favorite_segments ADD COLUMN IF NOT EXISTS elevation_loss_m DOUBLE PRECISION",
+		"ALTER TABLE favorite_segments ADD COLUMN IF NOT EXISTS net_elevation_m DOUBLE PRECISION",
+	}
+	for _, alterQuery := range alterQueries {
+		if _, err := conn.Exec(ctx, alterQuery); err != nil {
+			return fmt.Errorf("failed to alter favorite_segments: %w", err)
+		}
 	}
 
 	indexes := []string{
@@ -831,6 +848,13 @@ func ValidateAndMigrateSchema(ctx context.Context, conn *pgx.Conn, forceRebuild 
 		log.Printf("⚠️ Force rebuild mode enabled - mismatched tables will be dropped and recreated")
 	}
 
+	if err := ensureFavoriteSegmentColumns(ctx, conn); err != nil {
+		return err
+	}
+	if err := ensureActivitySummaryColumns(ctx, conn); err != nil {
+		return err
+	}
+
 	expectedSchemas := GetExpectedTableSchemas()
 	var results []TableValidationResult
 
@@ -901,6 +925,31 @@ func ValidateAndMigrateSchema(ctx context.Context, conn *pgx.Conn, forceRebuild 
 	}
 
 	log.Printf("✅ Schema validation completed")
+	return nil
+}
+
+func ensureFavoriteSegmentColumns(ctx context.Context, conn *pgx.Conn) error {
+	queries := []string{
+		"ALTER TABLE IF EXISTS favorite_segments ADD COLUMN IF NOT EXISTS elevation_loss_m DOUBLE PRECISION",
+		"ALTER TABLE IF EXISTS favorite_segments ADD COLUMN IF NOT EXISTS net_elevation_m DOUBLE PRECISION",
+	}
+	for _, query := range queries {
+		if _, err := conn.Exec(ctx, query); err != nil {
+			return fmt.Errorf("failed to ensure favorite_segments compatibility columns: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureActivitySummaryColumns(ctx context.Context, conn *pgx.Conn) error {
+	queries := []string{
+		"ALTER TABLE IF EXISTS activity_summaries ADD COLUMN IF NOT EXISTS gear_name TEXT",
+	}
+	for _, query := range queries {
+		if _, err := conn.Exec(ctx, query); err != nil {
+			return fmt.Errorf("failed to ensure activity_summaries compatibility columns: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -1134,6 +1183,7 @@ func GetExpectedTableSchemas() []TableSchema {
 				{Name: "location_state", Type: "text", Nullable: true},
 				{Name: "location_country", Type: "text", Nullable: true},
 				{Name: "gear_id", Type: "text", Nullable: true},
+				{Name: "gear_name", Type: "text", Nullable: true},
 				{Name: "average_speed", Type: "double precision", Nullable: true},
 				{Name: "max_speed", Type: "double precision", Nullable: true},
 				{Name: "average_cadence", Type: "double precision", Nullable: true},
@@ -1217,6 +1267,8 @@ func GetExpectedTableSchemas() []TableSchema {
 				{Name: "segment_bbox_geom", Type: "geometry", Nullable: true}, // Generated column
 				{Name: "segment_geog_simplified", Type: "geography", Nullable: true},
 				{Name: "elevation_gain_m", Type: "double precision", Nullable: true},
+				{Name: "elevation_loss_m", Type: "double precision", Nullable: true},
+				{Name: "net_elevation_m", Type: "double precision", Nullable: true},
 				{Name: "created_at", Type: "timestamp with time zone", Nullable: true},
 				{Name: "updated_at", Type: "timestamp with time zone", Nullable: true},
 			},

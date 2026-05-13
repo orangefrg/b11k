@@ -17,24 +17,78 @@
       <a class="link" href="/">&larr; Back to activities</a>
     </div>
 
-    <div class="list">
+    <div class="dashboard-controls">
+      <label class="graph-field">
+        <span>Filter</span>
+        <input id="segments-filter" type="search" placeholder="Segment name" />
+      </label>
+      <label class="graph-field">
+        <span>Direction</span>
+        <select id="segments-direction">
+          <option value="all">All</option>
+          <option value="uphill">Uphill</option>
+          <option value="downhill">Downhill</option>
+          <option value="flat">Flat</option>
+          <option value="unknown">Unknown</option>
+        </select>
+      </label>
+      <label class="graph-field">
+        <span>Sort</span>
+        <select id="segments-sort">
+          <option value="name">Name</option>
+          <option value="attempts">Attempts</option>
+          <option value="best">Best time</option>
+          <option value="worst">Worst time</option>
+          <option value="minhr">Min HR</option>
+          <option value="maxhr">Max HR</option>
+          <option value="slope">Slope</option>
+          <option value="ascent">Total ascent</option>
+          <option value="direction">Direction</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="segments-dashboard" class="segments-dashboard">
       {{range .Segments}}
-      <div class="item" data-segment-id="{{.ID}}">
-        <div class="item-row">
-          <div class="left">
-            <div><a class="link" href="/segment/{{.ID}}">{{.Name}}</a></div>
+      <article class="segment-card"
+        data-segment-id="{{.ID}}"
+        data-name="{{.SortName}}"
+        data-direction="{{.SortDirection}}"
+        data-attempts="{{.SortAttempts}}"
+        data-best="{{.SortBestTime}}"
+        data-worst="{{.SortWorstTime}}"
+        data-minhr="{{.SortMinHR}}"
+        data-maxhr="{{.SortMaxHR}}"
+        data-slope="{{.SortSlope}}"
+        data-ascent="{{.SortAscent}}">
+        <div class="segment-card-head">
+          <div>
+            <h2><a class="link" href="/segment/{{.ID}}">{{.Name}}</a></h2>
             {{if .Description}}
             <div class="meta">{{.Description}}</div>
             {{end}}
-            <div class="meta">Created: {{.CreatedAt}}</div>
           </div>
-          <div class="right">
+          <span class="direction-pill direction-{{.DirectionKey}}">{{.Direction}}</span>
+        </div>
+        <div class="segment-card-stats">
+          <div><span>Attempts</span><strong>{{.Attempts}}</strong></div>
+          <div><span>Best</span><strong>{{.MinTimeLabel}}</strong></div>
+          <div><span>Worst</span><strong>{{.MaxTimeLabel}}</strong></div>
+          <div><span>HR low</span><strong>{{.MinHRLabel}}</strong></div>
+          <div><span>HR high</span><strong>{{.MaxHRLabel}}</strong></div>
+          <div><span>Rise</span><strong>{{.NetRiseLabel}}</strong></div>
+          <div><span>Slope</span><strong>{{.SlopeLabel}}</strong></div>
+          <div><span>Total ascent</span><strong>{{.AscentLabel}}</strong></div>
+        </div>
+        <div class="segment-card-foot">
+          <span class="meta">{{.DistanceLabel}} · Created {{.CreatedAt}}</span>
+          <div>
             <button class="delete-segment-btn" data-segment-id="{{.ID}}" data-segment-name="{{.Name}}">Delete</button>
           </div>
         </div>
-      </div>
+      </article>
       {{else}}
-      <div>No segments found. Create segments from activity pages.</div>
+      <div class="item">No segments found. Create segments from activity pages.</div>
       {{end}}
     </div>
   </div>
