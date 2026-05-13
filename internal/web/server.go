@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -106,6 +107,9 @@ func parseTemplates() (*template.Template, error) {
 		"kcal": func(kj float64) float64 { return kj * 0.239006 },
 		"add":  func(a, b int) int { return a + b },
 		"sub":  func(a, b int) int { return a - b },
+		"asset": func(path string) string {
+			return cacheBustedAsset(path)
+		},
 		"hasActivity": func(data interface{}) bool {
 			if data == nil {
 				return false
@@ -132,6 +136,22 @@ func parseTemplates() (*template.Template, error) {
 		filepath.FromSlash("web/templates/partials/activity_sidebar.html"),
 		filepath.FromSlash("web/templates/partials/segment_sidebar.html"),
 	)
+}
+
+func cacheBustedAsset(path string) string {
+	if !strings.HasPrefix(path, "/static/") {
+		return path
+	}
+	localPath := filepath.FromSlash(strings.TrimPrefix(path, "/static/"))
+	info, err := os.Stat(filepath.Join("web", "static", localPath))
+	if err != nil {
+		return path
+	}
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return fmt.Sprintf("%s%sv=%d", path, separator, info.ModTime().Unix())
 }
 
 func (s *server) executeTemplate(w http.ResponseWriter, name string, data interface{}) error {
