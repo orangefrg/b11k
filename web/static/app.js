@@ -1,14 +1,13 @@
 (() => {
   function onActivityPage() {
-    const mapToken = window.__MAPBOX_TOKEN__;
-    if (!mapToken) return;
+    const mapStyleURL = window.__MAP_STYLE_URL__;
+    if (!mapStyleURL) return;
     const m = location.pathname.match(/\/activity\/(\d+)/);
     if (!m) return;
     const id = m[1];
-    mapboxgl.accessToken = mapToken;
-    const map = new mapboxgl.Map({
+    const map = new maplibregl.Map({
       container: 'map',
-      style: 'mapbox://styles/mapbox/dark-v11',
+      style: mapStyleURL,
       center: [0,0],
       zoom: 2
     });
@@ -22,7 +21,7 @@
       }));
       const fc = { type: 'FeatureCollection', features };
 
-      map.on('load', () => {
+      map.on('load', async () => {
         // Create line segments for gradient coloring
         const lineSegments = [];
         for (let i = 0; i < lineCoords.length - 1; i++) {
@@ -95,48 +94,89 @@
           console.warn('Error adding direction arrows:', e);
         }
 
-        // Start/Finish markers
+        // Start/finish and max metric markers
         try {
-          if (!map.hasImage('marker-start')) {
-            const s = 28; const c = document.createElement('canvas'); c.width = s; c.height = s; const g = c.getContext('2d');
-            g.fillStyle = '#2ecc71'; g.beginPath(); g.arc(s/2, s/2, s*0.35, 0, Math.PI*2); g.fill();
-            g.fillStyle = '#0b1020'; g.font = 'bold 14px sans-serif'; g.textAlign='center'; g.textBaseline='middle'; g.fillText('S', s/2, s/2);
-            map.addImage('marker-start', g.getImageData(0,0,s,s));
-          }
-          if (!map.hasImage('marker-finish')) {
-            const s = 28; const c = document.createElement('canvas'); c.width = s; c.height = s; const g = c.getContext('2d');
-            g.fillStyle = '#e74c3c'; g.beginPath(); g.arc(s/2, s/2, s*0.35, 0, Math.PI*2); g.fill();
-            g.fillStyle = '#0b1020'; g.font = 'bold 14px sans-serif'; g.textAlign='center'; g.textBaseline='middle'; g.fillText('F', s/2, s/2);
-            map.addImage('marker-finish', g.getImageData(0,0,s,s));
-          }
-          map.addSource('start-finish', {
+          await loadRouteMarkerImages(map);
+          map.addSource('route-endpoints', {
             type: 'geojson',
             data: {
               type: 'FeatureCollection',
               features: [
-                { type: 'Feature', geometry: { type: 'Point', coordinates: lineCoords[0] }, properties: { type: 'start' } },
-                { type: 'Feature', geometry: { type: 'Point', coordinates: lineCoords[lineCoords.length-1] }, properties: { type: 'finish' } }
+                { type: 'Feature', geometry: { type: 'Point', coordinates: lineCoords[0] }, properties: { type: 'start', icon: 'route-marker-start' } },
+                { type: 'Feature', geometry: { type: 'Point', coordinates: lineCoords[lineCoords.length-1] }, properties: { type: 'finish', icon: 'route-marker-finish' } }
               ]
             }
           });
-          map.addLayer({ id: 'start-marker', type: 'symbol', source: 'start-finish', layout: { 'icon-image': ['case', ['==',['get','type'],'start'], 'marker-start', 'marker-start'], 'icon-size': 1, 'icon-allow-overlap': true }, filter: ['==',['get','type'],'start'] });
-          map.addLayer({ id: 'finish-marker', type: 'symbol', source: 'start-finish', layout: { 'icon-image': ['case', ['==',['get','type'],'finish'], 'marker-finish', 'marker-finish'], 'icon-size': 1, 'icon-allow-overlap': true }, filter: ['==',['get','type'],'finish'] });
+          map.addLayer({
+            id: 'route-endpoint-markers',
+            type: 'symbol',
+            source: 'route-endpoints',
+            layout: {
+              'icon-image': ['get', 'icon'],
+              'icon-size': 1,
+              'icon-anchor': 'bottom',
+              'icon-allow-overlap': true,
+              'icon-ignore-placement': true
+            }
+          });
+
+          const maxMarkerFeatures = buildRouteMaxMarkerFeatures(features);
+          if (maxMarkerFeatures.length > 0) {
+            map.addSource('route-max-markers', {
+              type: 'geojson',
+              data: { type: 'FeatureCollection', features: maxMarkerFeatures }
+            });
+            map.addLayer({
+              id: 'route-max-point-outlines',
+              type: 'circle',
+              source: 'route-max-markers',
+              paint: {
+                'circle-radius': 3,
+                'circle-color': 'rgba(255,122,89,0.1)',
+                'circle-stroke-color': '#ff7a59',
+                'circle-stroke-width': 2,
+                'circle-opacity': 1,
+                'circle-stroke-opacity': 0.95
+              }
+            });
+            map.addLayer({
+              id: 'route-max-markers',
+              type: 'symbol',
+              source: 'route-max-markers',
+              layout: {
+                'icon-image': ['get', 'icon'],
+                'icon-size': 0.92,
+                'icon-anchor': 'center',
+                'icon-offset': [
+                  'match',
+                  ['get', 'type'],
+                  'max-hr', ['literal', [-18, -18]],
+                  'max-speed', ['literal', [18, -18]],
+                  'max-cadence', ['literal', [0, -34]],
+                  ['literal', [0, 0]]
+                ],
+                'icon-allow-overlap': true,
+                'icon-ignore-placement': true
+              }
+            });
+          }
         } catch (e) {
-          console.warn('Error adding start/finish markers:', e);
+          console.warn('Error adding route markers:', e);
         }
 
         try {
           map.addSource('route-points', { type: 'geojson', data: fc });
           map.addLayer({ id: 'route-points-layer', type: 'circle', source: 'route-points', paint: { 'circle-radius': 3, 'circle-color': '#f72585', 'circle-opacity': 0 } });
+          bringRouteMarkerLayersToFront(map);
         } catch (e) {
           console.warn('Error adding route points:', e);
         }
 
-        const bounds = new mapboxgl.LngLatBounds();
+        const bounds = new maplibregl.LngLatBounds();
         for (const c of lineCoords) bounds.extend(c);
         if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 40, duration: 0 });
 
-        const popup = new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'point-popup' });
+        const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, className: 'point-popup' });
         let segmentCreationMode = false; // Declare here so it's accessible to both handlers
         map.on('click', 'route-points-layer', (e) => {
           if (segmentCreationMode) return; // Don't show popup in segment creation mode
@@ -994,6 +1034,129 @@
       <div class="legend-vlabels">${rows.join('')}</div>`;
   }
 
+  async function loadRouteMarkerImages(map) {
+    const markerIcons = [
+      { id: 'route-marker-start', path: '/static/icons/point.svg', color: '#47d18c', size: 40 },
+      { id: 'route-marker-finish', path: '/static/icons/point.svg', color: '#e74c3c', size: 40 },
+      { id: 'route-marker-hr', path: '/static/icons/hr.svg', color: '#ff7a59', size: 34 },
+      { id: 'route-marker-speed', path: '/static/icons/speed.svg', color: '#ff7a59', size: 34 },
+      { id: 'route-marker-cadence', path: '/static/icons/cadence.svg', color: '#ff7a59', size: 34 }
+    ];
+
+    await Promise.all(markerIcons.map(icon => addTintedSvgImage(map, icon)));
+  }
+
+  async function addTintedSvgImage(map, icon) {
+    if (map.hasImage(icon.id)) return;
+
+    const response = await fetch(icon.path);
+    if (!response.ok) throw new Error(`Failed to load ${icon.path}`);
+    const svg = await response.text();
+    const imageData = await svgToImageData(tintSvg(svg, icon.color), icon.size);
+    map.addImage(icon.id, imageData);
+  }
+
+  function tintSvg(svg, color) {
+    return svg
+      .replace(/stroke="#000000"/g, `stroke="${color}"`)
+      .replace(/stroke="black"/g, `stroke="${color}"`)
+      .replace(/fill="#000000"/g, `fill="${color}"`)
+      .replace(/fill="black"/g, `fill="${color}"`);
+  }
+
+  function svgToImageData(svg, size) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+
+      image.onload = () => {
+        ctx.clearRect(0, 0, size, size);
+        ctx.shadowColor = 'rgba(14,17,22,0.95)';
+        ctx.shadowBlur = 3;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 1;
+        ctx.drawImage(image, 0, 0, size, size);
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.drawImage(image, 0, 0, size, size);
+        resolve(ctx.getImageData(0, 0, size, size));
+      };
+      image.onerror = reject;
+      image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    });
+  }
+
+  function buildRouteMaxMarkerFeatures(features) {
+    return [
+      ...maxMetricMarkerFeatures(features, {
+        metric: 'heartrate',
+        type: 'max-hr',
+        icon: 'route-marker-hr'
+      }),
+      ...maxMetricMarkerFeatures(features, {
+        metric: 'speed',
+        type: 'max-speed',
+        icon: 'route-marker-speed'
+      }),
+      ...maxMetricMarkerFeatures(features, {
+        metric: 'cadence',
+        type: 'max-cadence',
+        icon: 'route-marker-cadence'
+      })
+    ];
+  }
+
+  function bringRouteMarkerLayersToFront(map) {
+    [
+      'route-max-point-outlines',
+      'route-endpoint-markers',
+      'route-max-markers'
+    ].forEach(layerId => {
+      if (map.getLayer(layerId)) map.moveLayer(layerId);
+    });
+  }
+
+  function maxMetricMarkerFeatures(features, config) {
+    const values = features.map(feature => Number(feature.properties?.[config.metric]));
+    const maxValue = values.reduce((max, value) => {
+      if (!Number.isFinite(value) || value <= 0) return max;
+      return Math.max(max, value);
+    }, -Infinity);
+    if (!Number.isFinite(maxValue)) return [];
+
+    const maxIndices = [];
+    values.forEach((value, idx) => {
+      if (Number.isFinite(value) && value === maxValue) maxIndices.push(idx);
+    });
+
+    const markerIndices = [];
+    for (let i = 0; i < maxIndices.length;) {
+      const start = maxIndices[i];
+      let end = start;
+      while (i + 1 < maxIndices.length && maxIndices[i + 1] === end + 1) {
+        i++;
+        end = maxIndices[i];
+      }
+      markerIndices.push(Math.floor((start + end) / 2));
+      i++;
+    }
+
+    return markerIndices.map(idx => ({
+      type: 'Feature',
+      geometry: features[idx].geometry,
+      properties: {
+        type: config.type,
+        icon: config.icon,
+        metric: config.metric,
+        value: maxValue,
+        idx
+      }
+    }));
+  }
+
   function labelFor(metric){
     switch(metric){
       case 'speed': return 'Speed';
@@ -1343,17 +1506,16 @@
   }
 
   function onSegmentPage() {
-    const mapToken = window.__MAPBOX_TOKEN__;
+    const mapStyleURL = window.__MAP_STYLE_URL__;
     const segmentID = window.__SEGMENT_ID__;
-    if (!mapToken || !segmentID) return;
+    if (!mapStyleURL || !segmentID) return;
     
     const m = location.pathname.match(/\/segment\/(\d+)/);
     if (!m) return;
     
-    mapboxgl.accessToken = mapToken;
-    const map = new mapboxgl.Map({
+    const map = new maplibregl.Map({
       container: 'map',
-      style: 'mapbox://styles/mapbox/dark-v11',
+      style: mapStyleURL,
       center: [0, 0],
       zoom: 2
     });
@@ -1403,7 +1565,7 @@
         });
 
         // Fit bounds
-        const bounds = new mapboxgl.LngLatBounds();
+        const bounds = new maplibregl.LngLatBounds();
         for (const c of coords) bounds.extend(c);
         if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 40, duration: 0 });
         
@@ -1897,7 +2059,7 @@
 
             // Add click handler for point popup
             if (!map._activityPointsPopupHandler) {
-              const popup = new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'point-popup' });
+              const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, className: 'point-popup' });
               map.on('click', 'activity-points-layer', (e) => {
                 const f = e.features && e.features[0];
                 if (!f) return;
@@ -1987,7 +2149,7 @@
 
             // Add click handler for point popup (if not already added)
             if (!map._activityPointsPopupHandler) {
-              const popup = new mapboxgl.Popup({ closeButton: true, closeOnClick: true, className: 'point-popup' });
+              const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, className: 'point-popup' });
               map.on('click', 'activity-points-layer', (e) => {
                 const f = e.features && e.features[0];
                 if (!f) return;
@@ -2756,9 +2918,155 @@
     loadActivities(false);
   }
 
+  function onDiscoveredPage() {
+    const el = document.getElementById('discovered-map');
+    if (!el) return;
+
+    const mapStyleURL = window.__MAP_STYLE_URL__;
+    if (!mapStyleURL) return;
+
+    const statusEl = document.getElementById('discovered-status');
+    const rebuildBtn = document.getElementById('discovered-rebuild-btn');
+    const map = new maplibregl.Map({
+      container: 'discovered-map',
+      style: mapStyleURL,
+      center: [0, 0],
+      zoom: 2
+    });
+
+    let hasFitCoverage = false;
+    let fogRequestID = 0;
+
+    const setStatus = (message, state = '') => {
+      if (!statusEl) return;
+      statusEl.textContent = message;
+      statusEl.classList.toggle('warning', state === 'warning');
+      statusEl.classList.toggle('ready', state === 'ready');
+    };
+
+    const loadStatus = async () => {
+      const response = await fetch('/api/discovered/status');
+      if (!response.ok) throw new Error(await response.text() || 'Failed to load discovered map status');
+      const status = await response.json();
+
+      if (status.stale) {
+        setStatus(status.message || 'Discovered map is out of sync. Rebuild coverage to refresh the fog.', 'warning');
+      } else {
+        const rebuilt = status.rebuilt_at ? ` Last rebuilt ${new Date(status.rebuilt_at).toLocaleString()}.` : '';
+        setStatus(`Coverage is up to date for ${status.cached_activities || 0} bike activities.${rebuilt}`, 'ready');
+      }
+
+      if (!hasFitCoverage && Array.isArray(status.bbox) && status.bbox.length === 4) {
+        hasFitCoverage = true;
+        map.fitBounds([[status.bbox[0], status.bbox[1]], [status.bbox[2], status.bbox[3]]], {
+          padding: 60,
+          duration: 0
+        });
+      }
+
+      return status;
+    };
+
+    const fetchDiscoveredOverlay = async () => {
+      if (!map.getSource('discovered-fog')) return;
+      const requestID = ++fogRequestID;
+      const bounds = map.getBounds();
+      const bbox = [
+        bounds.getWest(),
+        bounds.getSouth(),
+        bounds.getEast(),
+        bounds.getNorth()
+      ].join(',');
+      const [fogResponse, coverageResponse] = await Promise.all([
+        fetch(`/api/discovered/fog?bbox=${encodeURIComponent(bbox)}`),
+        fetch(`/api/discovered/coverage?bbox=${encodeURIComponent(bbox)}`)
+      ]);
+      if (!fogResponse.ok) throw new Error(await fogResponse.text() || 'Failed to load discovered fog');
+      if (!coverageResponse.ok) throw new Error(await coverageResponse.text() || 'Failed to load discovered coverage');
+      const fog = await fogResponse.json();
+      const coverage = await coverageResponse.json();
+      if (requestID !== fogRequestID) return;
+      map.getSource('discovered-fog').setData(fog);
+      if (map.getSource('discovered-coverage')) {
+        map.getSource('discovered-coverage').setData(coverage);
+      }
+    };
+
+    map.on('load', async () => {
+      map.addSource('discovered-fog', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
+      });
+      map.addSource('discovered-coverage', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
+      });
+      map.addLayer({
+        id: 'discovered-glow-outer',
+        type: 'line',
+        source: 'discovered-coverage',
+        paint: {
+          'line-color': '#70d6ff',
+          'line-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0.58, 10, 0.24, 13, 0],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 5, 20, 8, 34, 11, 24, 13, 0],
+          'line-blur': ['interpolate', ['linear'], ['zoom'], 5, 18, 10, 12, 13, 0]
+        }
+      });
+      map.addLayer({
+        id: 'discovered-glow-inner',
+        type: 'line',
+        source: 'discovered-coverage',
+        paint: {
+          'line-color': '#ff7a59',
+          'line-opacity': ['interpolate', ['linear'], ['zoom'], 6, 0.44, 10, 0.18, 13, 0],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 5, 8, 8, 16, 11, 10, 13, 0],
+          'line-blur': ['interpolate', ['linear'], ['zoom'], 5, 8, 10, 5, 13, 0]
+        }
+      });
+      map.addLayer({
+        id: 'discovered-fog',
+        type: 'fill',
+        source: 'discovered-fog',
+        paint: {
+          'fill-color': '#05070a',
+          'fill-opacity': 0.9
+        }
+      });
+
+      try {
+        await loadStatus();
+        await fetchDiscoveredOverlay();
+      } catch (error) {
+        setStatus(error.message, 'warning');
+      }
+    });
+
+    map.on('moveend', () => {
+      fetchDiscoveredOverlay().catch(error => setStatus(error.message, 'warning'));
+    });
+
+    if (rebuildBtn) {
+      rebuildBtn.addEventListener('click', async () => {
+        rebuildBtn.disabled = true;
+        setStatus('Rebuilding discovered coverage...', 'warning');
+        try {
+          const response = await fetch('/api/discovered/rebuild', { method: 'POST' });
+          if (!response.ok) throw new Error(await response.text() || 'Failed to rebuild discovered map');
+          hasFitCoverage = false;
+          await loadStatus();
+          await fetchDiscoveredOverlay();
+        } catch (error) {
+          setStatus(error.message, 'warning');
+        } finally {
+          rebuildBtn.disabled = false;
+        }
+      });
+    }
+  }
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => { onActivityPage(); onIndexPage(); onSegmentsPage(); onSegmentPage(); });
+    document.addEventListener('DOMContentLoaded', () => { onActivityPage(); onIndexPage(); onSegmentsPage(); onSegmentPage(); onDiscoveredPage(); });
   } else {
-    onActivityPage(); onIndexPage(); onSegmentsPage(); onSegmentPage();
+    onActivityPage(); onIndexPage(); onSegmentsPage(); onSegmentPage(); onDiscoveredPage();
   }
 })();

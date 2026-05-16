@@ -9,6 +9,7 @@ Copyright (c) 2025 github.com/orangefrg
 - **Strava Integration**: Authenticate with Strava and sync your bike activities
 - **Activity Visualization**: View detailed activity information with interactive maps
 - **Segment Tracking**: Track and analyze favorite segments across activities
+- **Discovered Map**: Explore a fog-of-war map revealed by synced bike routes
 - **Spatial Analysis**: Uses PostGIS for advanced geographic queries and operations
 - **Web UI**: Modern web interface for browsing activities and segments
 - **Real-time Sync**: Server-Sent Events (SSE) for real-time sync progress updates
@@ -18,7 +19,6 @@ Copyright (c) 2025 github.com/orangefrg
 
 - **PostgreSQL** (version 12+) with **PostGIS** extension
 - **Strava API credentials** (Client ID and Client Secret)
-- **Mapbox token** (optional, for map visualization)
 - **Docker** (for containerized deployment)
 
 ## Installation
@@ -33,11 +33,13 @@ The Compose stack runs the web app and its own PostGIS database. PostgreSQL is e
 
 ```bash
 cp .env.example .env
-# Edit .env with Strava, Mapbox, and database secret values.
+# Edit .env with Strava and database secret values.
 docker compose up --build
 ```
 
 Open `http://localhost:8080`.
+
+Maps use MapLibre GL JS with the local OpenFreeMap style at `web/static/map-style.json`, so style edits are visible after a browser refresh in live mode.
 
 ### Local Live Testing
 
@@ -54,6 +56,8 @@ docker compose -f docker-compose.live.yml restart b11k-live-app
 ```
 
 For narrow screens, activity and segment detail pages default to showing stats and graphs before the map. Set `B11K_MOBILE_ACTIVITY_ORDER=map_first` in `.env` if you want the map first instead.
+
+The Discovered map is enabled by default. Set `B11K_DISCOVERED_MAP_ENABLED=false` to hide its navigation, disable its API endpoints, and skip sync-time coverage rebuilds. Reveal radius and route sampling are controlled by `B11K_DISCOVERED_REVEAL_RADIUS_METERS` and `B11K_DISCOVERED_SAMPLE_DISTANCE_METERS`.
 
 ### Local Run
 

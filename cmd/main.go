@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"b11k/internal/pggeo"
@@ -21,20 +22,22 @@ import (
 )
 
 type Config struct {
-	StravaClientID      string `yaml:"strava_client_id"`
-	StravaClientSecret  string `yaml:"strava_client_secret"`
-	StravaRedirectURI   string `yaml:"strava_redirect_uri"`
-	MapboxToken         string `yaml:"mapbox_token"`
-	PGIP                string `yaml:"pg_ip"`
-	PGPort              string `yaml:"pg_port"`
-	PGUser              string `yaml:"pg_user"`
-	PGPassword          string `yaml:"pg_secret"`
-	PGDatabase          string `yaml:"pg_db"`
-	WebHost             string `yaml:"web_host"`
-	WebPort             string `yaml:"web_port"`
-	WebProtocol         string `yaml:"web_protocol"` // "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy
-	DevReloadTemplates  bool   `yaml:"dev_reload_templates"`
-	MobileActivityOrder string `yaml:"mobile_activity_order"`
+	StravaClientID                 string  `yaml:"strava_client_id"`
+	StravaClientSecret             string  `yaml:"strava_client_secret"`
+	StravaRedirectURI              string  `yaml:"strava_redirect_uri"`
+	PGIP                           string  `yaml:"pg_ip"`
+	PGPort                         string  `yaml:"pg_port"`
+	PGUser                         string  `yaml:"pg_user"`
+	PGPassword                     string  `yaml:"pg_secret"`
+	PGDatabase                     string  `yaml:"pg_db"`
+	WebHost                        string  `yaml:"web_host"`
+	WebPort                        string  `yaml:"web_port"`
+	WebProtocol                    string  `yaml:"web_protocol"` // "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy
+	DevReloadTemplates             bool    `yaml:"dev_reload_templates"`
+	MobileActivityOrder            string  `yaml:"mobile_activity_order"`
+	DiscoveredMapEnabled           *bool   `yaml:"discovered_map_enabled"`
+	DiscoveredRevealRadiusMeters   float64 `yaml:"discovered_reveal_radius_meters"`
+	DiscoveredSampleDistanceMeters float64 `yaml:"discovered_sample_distance_meters"`
 }
 
 func main() {
@@ -138,20 +141,22 @@ func main() {
 
 	// Default behavior: serve web UI (if -serve is provided or not)
 	web.RunServer(ctx, web.Config{
-		StravaClientID:      config.StravaClientID,
-		StravaClientSecret:  config.StravaClientSecret,
-		StravaRedirectURI:   config.StravaRedirectURI,
-		MapboxToken:         config.MapboxToken,
-		PGIP:                config.PGIP,
-		PGPort:              config.PGPort,
-		PGUser:              config.PGUser,
-		PGPassword:          config.PGPassword,
-		PGDatabase:          config.PGDatabase,
-		WebHost:             config.WebHost,
-		WebPort:             config.WebPort,
-		WebProtocol:         config.WebProtocol,
-		DevReloadTemplates:  config.DevReloadTemplates,
-		MobileActivityOrder: config.MobileActivityOrder,
+		StravaClientID:                 config.StravaClientID,
+		StravaClientSecret:             config.StravaClientSecret,
+		StravaRedirectURI:              config.StravaRedirectURI,
+		PGIP:                           config.PGIP,
+		PGPort:                         config.PGPort,
+		PGUser:                         config.PGUser,
+		PGPassword:                     config.PGPassword,
+		PGDatabase:                     config.PGDatabase,
+		WebHost:                        config.WebHost,
+		WebPort:                        config.WebPort,
+		WebProtocol:                    config.WebProtocol,
+		DevReloadTemplates:             config.DevReloadTemplates,
+		MobileActivityOrder:            config.MobileActivityOrder,
+		DiscoveredMapEnabled:           *config.DiscoveredMapEnabled,
+		DiscoveredRevealRadiusMeters:   config.DiscoveredRevealRadiusMeters,
+		DiscoveredSampleDistanceMeters: config.DiscoveredSampleDistanceMeters,
 	})
 }
 
@@ -241,7 +246,6 @@ func applyEnvOverrides(config *Config) {
 	envString(&config.StravaClientID, "B11K_STRAVA_CLIENT_ID")
 	envString(&config.StravaClientSecret, "B11K_STRAVA_CLIENT_SECRET")
 	envString(&config.StravaRedirectURI, "B11K_STRAVA_REDIRECT_URI")
-	envString(&config.MapboxToken, "B11K_MAPBOX_TOKEN")
 	envString(&config.PGIP, "B11K_PG_HOST", "B11K_PG_IP")
 	envString(&config.PGPort, "B11K_PG_PORT")
 	envString(&config.PGUser, "B11K_PG_USER")
@@ -252,6 +256,9 @@ func applyEnvOverrides(config *Config) {
 	envString(&config.WebProtocol, "B11K_WEB_PROTOCOL")
 	envString(&config.MobileActivityOrder, "B11K_MOBILE_ACTIVITY_ORDER")
 	envBool(&config.DevReloadTemplates, "B11K_DEV_RELOAD_TEMPLATES")
+	envBoolPtr(&config.DiscoveredMapEnabled, "B11K_DISCOVERED_MAP_ENABLED")
+	envFloat(&config.DiscoveredRevealRadiusMeters, "B11K_DISCOVERED_REVEAL_RADIUS_METERS")
+	envFloat(&config.DiscoveredSampleDistanceMeters, "B11K_DISCOVERED_SAMPLE_DISTANCE_METERS")
 }
 
 func envString(target *string, names ...string) {
@@ -279,11 +286,55 @@ func envBool(target *bool, names ...string) {
 	}
 }
 
+func envBoolPtr(target **bool, names ...string) {
+	for _, name := range names {
+		value, ok := os.LookupEnv(name)
+		if !ok {
+			continue
+		}
+		parsed := false
+		switch value {
+		case "1", "true", "TRUE", "yes", "YES", "on", "ON":
+			parsed = true
+		case "0", "false", "FALSE", "no", "NO", "off", "OFF":
+			parsed = false
+		default:
+			return
+		}
+		*target = &parsed
+		return
+	}
+}
+
+func envFloat(target *float64, names ...string) {
+	for _, name := range names {
+		value := os.Getenv(name)
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err == nil {
+			*target = parsed
+		}
+		return
+	}
+}
+
 func normalizeConfig(config *Config) {
 	switch config.MobileActivityOrder {
 	case "map_first", "stats_first":
 	default:
 		config.MobileActivityOrder = "stats_first"
+	}
+	if config.DiscoveredMapEnabled == nil {
+		enabled := true
+		config.DiscoveredMapEnabled = &enabled
+	}
+	if config.DiscoveredRevealRadiusMeters <= 0 {
+		config.DiscoveredRevealRadiusMeters = 100
+	}
+	if config.DiscoveredSampleDistanceMeters <= 0 {
+		config.DiscoveredSampleDistanceMeters = 50
 	}
 }
 

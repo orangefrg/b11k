@@ -1,0 +1,35 @@
+{{define "discovered.html"}}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Discovered Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <link rel="stylesheet" href="{{asset "/static/app.css"}}" />
+  <script>window.__MAP_STYLE_URL__='{{asset "/static/map-style.json"}}';</script>
+  <script>window.__DISCOVERED_RADIUS_METERS__={{.DiscoveredRevealRadiusMeters}};</script>
+  <script>window.__DISCOVERED_SAMPLE_METERS__={{.DiscoveredSampleDistanceMeters}};</script>
+  <script defer src="{{asset "/static/app.js"}}"></script>
+</head>
+<body class="app">
+  {{template "topbar" .}}
+  <main class="discovered-layout">
+    <section class="discovered-map-shell">
+      <div id="discovered-map" class="map-panel"></div>
+      <div class="discovered-panel">
+        <div class="discovered-panel-head">
+          <div>
+            <h1 class="discovered-title">Discovered</h1>
+            <p class="discovered-meta">{{printf "%.0f" .DiscoveredRevealRadiusMeters}} m reveal radius · {{printf "%.0f" .DiscoveredSampleDistanceMeters}} m samples</p>
+          </div>
+          <button id="discovered-rebuild-btn" type="button">Rebuild</button>
+        </div>
+        <div id="discovered-status" class="discovered-status">Loading coverage status...</div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
+{{end}}

@@ -11,7 +11,7 @@ fi
 if [ ! -f ".env" ]; then
   cp .env.example .env
   echo "Created .env from .env.example."
-  echo "Edit .env with Strava and Mapbox values when you need login and maps."
+  echo "Edit .env with Strava values when you need login."
 fi
 
 echo "Starting b11k live stack..."

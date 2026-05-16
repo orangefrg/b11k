@@ -8,7 +8,6 @@ Copyright (c) 2025 github.com/orangefrg
 
 - **PostgreSQL** (version 12+) with **PostGIS** extension
 - **Strava API credentials** (Client ID and Client Secret)
-- **Mapbox token** (optional, for map visualization)
 - **Docker** (for containerized deployment)
 
 ## Setting up PostgreSQL Database
@@ -172,7 +171,6 @@ The included Compose stack runs both the b11k web app and a dedicated PostGIS da
 2. Edit `.env` with your secrets:
    - `B11K_STRAVA_CLIENT_ID`
    - `B11K_STRAVA_CLIENT_SECRET`
-   - `B11K_MAPBOX_TOKEN`
    - `B11K_PG_PASSWORD`
 
 3. Start the stack:
@@ -223,7 +221,6 @@ Create a new file named `config.yaml` in the project root with the following con
 strava_client_id: ""  # Prefer B11K_STRAVA_CLIENT_ID in .env
 strava_client_secret: ""  # Prefer B11K_STRAVA_CLIENT_SECRET in .env
 # strava_redirect_uri: http://localhost:8080/strava/callback  # Optional: auto-constructed from web_protocol, web_host and web_port if not provided
-mapbox_token: ""  # Prefer B11K_MAPBOX_TOKEN in .env
 pg_ip: localhost
 pg_port: 5432
 pg_db: b11k_db
@@ -232,6 +229,9 @@ pg_secret: ""  # Prefer B11K_PG_PASSWORD in .env
 web_host: localhost  # Hostname or IP address for the web server (default: localhost)
 web_port: 8080
 web_protocol: http  # "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy with HTTPS termination
+discovered_map_enabled: true
+discovered_reveal_radius_meters: 100
+discovered_sample_distance_meters: 50
 ```
 
 Secrets can be provided through environment variables instead of `config.yaml`. The app reads `config.yaml` first, then applies any `B11K_*` environment overrides.
@@ -241,7 +241,6 @@ Secrets can be provided through environment variables instead of `config.yaml`. 
 - **strava_client_id**: Your Strava API Client ID (see below for how to get it)
 - **strava_client_secret**: Your Strava API Client Secret
 - **strava_redirect_uri**: (Optional) The callback URL after Strava authentication. If not provided, it will be automatically constructed from `web_protocol`, `web_host` and `web_port` as `web_protocol://web_host:web_port/strava/callback`. Must match your Strava app settings.
-- **mapbox_token**: Your Mapbox access token for map visualization (optional but recommended)
 - **pg_ip**: PostgreSQL server hostname or IP address
 - **pg_port**: PostgreSQL server port (default: 5432)
 - **pg_db**: PostgreSQL database name
@@ -250,6 +249,9 @@ Secrets can be provided through environment variables instead of `config.yaml`. 
 - **web_host**: Hostname or IP address for the web server (default: `localhost`). Used to construct the Strava redirect URI if `strava_redirect_uri` is not explicitly set.
 - **web_port**: Port for the web server to listen on (default: 8080). **Important**: Use a non-privileged port (1024 or higher). Ports below 1024 (like 80, 443) require root privileges. When behind Cloudflare Tunnel or a reverse proxy, the application listens on a regular port (e.g., 8080) and the proxy handles HTTPS termination.
 - **web_protocol**: Protocol for constructing the redirect URI - `"http"` or `"https"` (default: `"http"`). **Important**: This does NOT affect which port the server listens on. Set to `"https"` when behind Cloudflare Tunnel, reverse proxy, or load balancer that provides HTTPS termination. This ensures the redirect URI is constructed with `https://` to match what the browser sees through the proxy.
+- **discovered_map_enabled**: Enables the Discovered fog-of-war map. Set to `false` to remove its navigation, disable its API endpoints, and skip sync-time coverage rebuilds.
+- **discovered_reveal_radius_meters**: Radius around each bike route that is revealed on the Discovered map.
+- **discovered_sample_distance_meters**: Approximate spacing between route points used to build discovered coverage.
 
 **Important**: Replace all placeholder values with your actual credentials and database information.
 
@@ -279,11 +281,9 @@ web_protocol: https  # Redirect URIs use https:// to match browser
 
 Make sure your Strava app's callback domain matches your `web_host` and `web_port` configuration, and uses the same protocol (`http://` or `https://`).
 
-### Getting Mapbox Token
+### Map Styling
 
-1. Sign up at [Mapbox](https://account.mapbox.com/)
-2. Create an access token at [Mapbox Access Tokens](https://account.mapbox.com/access-tokens/)
-3. Copy your token
+Maps use MapLibre GL JS with the local OpenFreeMap style at `web/static/map-style.json`. In the live Docker stack, edits to that style file are served directly from disk and are visible after a browser refresh.
 
 ## Building
 
