@@ -2970,12 +2970,12 @@
     const fetchDiscoveredOverlay = async () => {
       if (!map.getSource('discovered-fog')) return;
       const requestID = ++fogRequestID;
-      const bounds = map.getBounds();
+      const bounds = expandedMapBounds(map, 2.5);
       const bbox = [
-        bounds.getWest(),
-        bounds.getSouth(),
-        bounds.getEast(),
-        bounds.getNorth()
+        bounds.minLng,
+        bounds.minLat,
+        bounds.maxLng,
+        bounds.maxLat
       ].join(',');
       const [fogResponse, coverageResponse] = await Promise.all([
         fetch(`/api/discovered/fog?bbox=${encodeURIComponent(bbox)}`),
@@ -3062,6 +3062,22 @@
         }
       });
     }
+  }
+
+  function expandedMapBounds(map, factor) {
+    const bounds = map.getBounds();
+    const west = bounds.getWest();
+    const east = bounds.getEast();
+    const south = bounds.getSouth();
+    const north = bounds.getNorth();
+    const lngPad = Math.max(0, east - west) * factor;
+    const latPad = Math.max(0, north - south) * factor;
+    return {
+      minLng: Math.max(-180, west - lngPad),
+      minLat: Math.max(-85, south - latPad),
+      maxLng: Math.min(180, east + lngPad),
+      maxLat: Math.min(85, north + latPad)
+    };
   }
 
   if (document.readyState === 'loading') {
