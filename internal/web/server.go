@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -23,20 +24,22 @@ import (
 )
 
 type Config struct {
-	StravaClientID      string
-	StravaClientSecret  string
-	StravaRedirectURI   string
-	MapboxToken         string
-	PGIP                string
-	PGPort              string
-	PGUser              string
-	PGPassword          string
-	PGDatabase          string
-	WebHost             string
-	WebPort             string
-	WebProtocol         string
-	DevReloadTemplates  bool
-	MobileActivityOrder string
+	StravaClientID                 string
+	StravaClientSecret             string
+	StravaRedirectURI              string
+	PGIP                           string
+	PGPort                         string
+	PGUser                         string
+	PGPassword                     string
+	PGDatabase                     string
+	WebHost                        string
+	WebPort                        string
+	WebProtocol                    string
+	DevReloadTemplates             bool
+	MobileActivityOrder            string
+	DiscoveredMapEnabled           bool
+	DiscoveredRevealRadiusMeters   float64
+	DiscoveredSampleDistanceMeters float64
 }
 
 type server struct {
@@ -90,6 +93,10 @@ func RunServer(ctx context.Context, cfg Config) {
 	http.HandleFunc("/segments", s.handleSegmentsPage)
 	http.HandleFunc("/segment/", s.handleSegmentPage)
 	http.HandleFunc("/profile", s.handleProfilePage)
+	if cfg.DiscoveredMapEnabled {
+		http.HandleFunc("/discovered", s.handleDiscoveredPage)
+		http.HandleFunc("/api/discovered/", s.handleDiscoveredAPI)
+	}
 
 	// static
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(filepath.FromSlash("web/static")))))
@@ -106,6 +113,9 @@ func parseTemplates() (*template.Template, error) {
 		"kcal": func(kj float64) float64 { return kj * 0.239006 },
 		"add":  func(a, b int) int { return a + b },
 		"sub":  func(a, b int) int { return a - b },
+		"asset": func(path string) string {
+			return cacheBustedAsset(path)
+		},
 		"hasActivity": func(data interface{}) bool {
 			if data == nil {
 				return false
@@ -125,6 +135,7 @@ func parseTemplates() (*template.Template, error) {
 		filepath.FromSlash("web/templates/segments.html"),
 		filepath.FromSlash("web/templates/segment.html"),
 		filepath.FromSlash("web/templates/profile.html"),
+		filepath.FromSlash("web/templates/discovered.html"),
 		filepath.FromSlash("web/templates/partials/topbar.html"),
 		filepath.FromSlash("web/templates/partials/map.html"),
 		filepath.FromSlash("web/templates/partials/graph.html"),
@@ -132,6 +143,22 @@ func parseTemplates() (*template.Template, error) {
 		filepath.FromSlash("web/templates/partials/activity_sidebar.html"),
 		filepath.FromSlash("web/templates/partials/segment_sidebar.html"),
 	)
+}
+
+func cacheBustedAsset(path string) string {
+	if !strings.HasPrefix(path, "/static/") {
+		return path
+	}
+	localPath := filepath.FromSlash(strings.TrimPrefix(path, "/static/"))
+	info, err := os.Stat(filepath.Join("web", "static", localPath))
+	if err != nil {
+		return path
+	}
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return fmt.Sprintf("%s%sv=%d", path, separator, info.ModTime().Unix())
 }
 
 func (s *server) executeTemplate(w http.ResponseWriter, name string, data interface{}) error {
@@ -414,25 +441,27 @@ func (s *server) renderActivitiesPageWithReq(w http.ResponseWriter, r *http.Requ
 		pageItems = activities[startIdx:endIdx]
 	}
 	data := struct {
-		Activities   []strava.ActivitySummary
-		ShowLoginCTA bool
-		Authorized   bool
-		Athlete      *strava.Athlete
-		CurrentPage  int
-		TotalPages   int
-		HasNext      bool
-		HasPrev      bool
-		PerPage      int
+		Activities           []strava.ActivitySummary
+		ShowLoginCTA         bool
+		Authorized           bool
+		Athlete              *strava.Athlete
+		CurrentPage          int
+		TotalPages           int
+		HasNext              bool
+		HasPrev              bool
+		PerPage              int
+		DiscoveredMapEnabled bool
 	}{
-		Activities:   pageItems,
-		ShowLoginCTA: s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:   s.token != "",
-		Athlete:      s.user,
-		CurrentPage:  page,
-		TotalPages:   totalPages,
-		HasNext:      page < totalPages,
-		HasPrev:      page > 1,
-		PerPage:      perPage,
+		Activities:           pageItems,
+		ShowLoginCTA:         s.token == "" && s.cfg.StravaClientID != "",
+		Authorized:           s.token != "",
+		Athlete:              s.user,
+		CurrentPage:          page,
+		TotalPages:           totalPages,
+		HasNext:              page < totalPages,
+		HasPrev:              page > 1,
+		PerPage:              perPage,
+		DiscoveredMapEnabled: s.cfg.DiscoveredMapEnabled,
 	}
 	if err := s.executeTemplate(w, "index.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -504,21 +533,21 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data := struct {
-		Activity            strava.ActivitySummary
-		ActivityHRZones     []pggeo.HRZoneDistribution
-		MapboxToken         string
-		Athlete             *strava.Athlete
-		ShowLoginCTA        bool
-		Authorized          bool
-		MobileActivityOrder string
+		Activity             strava.ActivitySummary
+		ActivityHRZones      []pggeo.HRZoneDistribution
+		Athlete              *strava.Athlete
+		ShowLoginCTA         bool
+		Authorized           bool
+		MobileActivityOrder  string
+		DiscoveredMapEnabled bool
 	}{
-		Activity:            *activity,
-		ActivityHRZones:     activityHRZones,
-		MapboxToken:         s.cfg.MapboxToken,
-		Athlete:             s.user,
-		ShowLoginCTA:        s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:          s.token != "",
-		MobileActivityOrder: s.cfg.MobileActivityOrder,
+		Activity:             *activity,
+		ActivityHRZones:      activityHRZones,
+		Athlete:              s.user,
+		ShowLoginCTA:         s.token == "" && s.cfg.StravaClientID != "",
+		Authorized:           s.token != "",
+		MobileActivityOrder:  s.cfg.MobileActivityOrder,
+		DiscoveredMapEnabled: s.cfg.DiscoveredMapEnabled,
 	}
 	if err := s.executeTemplate(w, "activity.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -609,6 +638,11 @@ func (s *server) handleStravaSyncSSE(w http.ResponseWriter, r *http.Request) {
 		Timeframe: sync.TimeframeConfig{
 			StartTime: startTime,
 			EndTime:   endTime,
+		},
+		DiscoveredMap: sync.DiscoveredMapConfig{
+			Enabled:              s.cfg.DiscoveredMapEnabled,
+			RevealRadiusMeters:   s.cfg.DiscoveredRevealRadiusMeters,
+			SampleDistanceMeters: s.cfg.DiscoveredSampleDistanceMeters,
 		},
 	}
 
@@ -822,6 +856,156 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
+}
+
+func (s *server) handleDiscoveredPage(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.DiscoveredMapEnabled {
+		http.NotFound(w, r)
+		return
+	}
+	if r.URL.Path != "/discovered" {
+		http.NotFound(w, r)
+		return
+	}
+	s.ensureSessionFromRequest(r)
+	if s.user == nil {
+		http.Error(w, "Authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	data := struct {
+		Athlete                        *strava.Athlete
+		ShowLoginCTA                   bool
+		Authorized                     bool
+		DiscoveredMapEnabled           bool
+		DiscoveredRevealRadiusMeters   float64
+		DiscoveredSampleDistanceMeters float64
+	}{
+		Athlete:                        s.user,
+		ShowLoginCTA:                   s.token == "" && s.cfg.StravaClientID != "",
+		Authorized:                     s.token != "",
+		DiscoveredMapEnabled:           s.cfg.DiscoveredMapEnabled,
+		DiscoveredRevealRadiusMeters:   s.cfg.DiscoveredRevealRadiusMeters,
+		DiscoveredSampleDistanceMeters: s.cfg.DiscoveredSampleDistanceMeters,
+	}
+
+	if err := s.executeTemplate(w, "discovered.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *server) handleDiscoveredAPI(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.DiscoveredMapEnabled {
+		http.NotFound(w, r)
+		return
+	}
+	s.ensureSessionFromRequest(r)
+	if s.user == nil {
+		http.Error(w, "Authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	action := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/discovered/"), "/")
+	switch action {
+	case "status":
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var status *pggeo.DiscoveredCoverageStatus
+		err := s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			status, dbErr = pggeo.GetDiscoveredCoverageStatus(s.ctx, conn, s.user.ID, s.cfg.DiscoveredSampleDistanceMeters, s.cfg.DiscoveredRevealRadiusMeters)
+			return dbErr
+		})
+		if err != nil {
+			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, status)
+	case "rebuild":
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var status *pggeo.DiscoveredCoverageStatus
+		err := s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			status, dbErr = pggeo.RebuildDiscoveredCoverage(s.ctx, conn, s.user.ID, s.cfg.DiscoveredSampleDistanceMeters, s.cfg.DiscoveredRevealRadiusMeters)
+			return dbErr
+		})
+		if err != nil {
+			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, status)
+	case "fog":
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		minLng, minLat, maxLng, maxLat, ok := parseBBox(r.URL.Query().Get("bbox"))
+		if !ok {
+			http.Error(w, "bbox must be minLng,minLat,maxLng,maxLat", http.StatusBadRequest)
+			return
+		}
+		var featureCollection string
+		err := s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			featureCollection, dbErr = pggeo.GetDiscoveredFogFeatureCollection(s.ctx, conn, s.user.ID, minLng, minLat, maxLng, maxLat, s.cfg.DiscoveredSampleDistanceMeters, s.cfg.DiscoveredRevealRadiusMeters)
+			return dbErr
+		})
+		if err != nil {
+			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(featureCollection))
+	case "coverage":
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		minLng, minLat, maxLng, maxLat, ok := parseBBox(r.URL.Query().Get("bbox"))
+		if !ok {
+			http.Error(w, "bbox must be minLng,minLat,maxLng,maxLat", http.StatusBadRequest)
+			return
+		}
+		var featureCollection string
+		err := s.withDB(func(conn *pgx.Conn) error {
+			var dbErr error
+			featureCollection, dbErr = pggeo.GetDiscoveredCoverageFeatureCollection(s.ctx, conn, s.user.ID, minLng, minLat, maxLng, maxLat, s.cfg.DiscoveredSampleDistanceMeters, s.cfg.DiscoveredRevealRadiusMeters)
+			return dbErr
+		})
+		if err != nil {
+			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(featureCollection))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func parseBBox(raw string) (float64, float64, float64, float64, bool) {
+	parts := strings.Split(raw, ",")
+	if len(parts) != 4 {
+		return 0, 0, 0, 0, false
+	}
+	values := make([]float64, 4)
+	for i, part := range parts {
+		value, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
+		if err != nil {
+			return 0, 0, 0, 0, false
+		}
+		values[i] = value
+	}
+	if values[0] >= values[2] || values[1] >= values[3] {
+		return 0, 0, 0, 0, false
+	}
+	return values[0], values[1], values[2], values[3], true
 }
 
 // handleSegmentsAPI handles GET /api/segments and POST /api/segments
@@ -1271,15 +1455,17 @@ func (s *server) handleSegmentsPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		Segments     []pggeo.SegmentDashboardSummary
-		Athlete      *strava.Athlete
-		ShowLoginCTA bool
-		Authorized   bool
+		Segments             []pggeo.SegmentDashboardSummary
+		Athlete              *strava.Athlete
+		ShowLoginCTA         bool
+		Authorized           bool
+		DiscoveredMapEnabled bool
 	}{
-		Segments:     segments,
-		Athlete:      s.user,
-		ShowLoginCTA: s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:   s.token != "",
+		Segments:             segments,
+		Athlete:              s.user,
+		ShowLoginCTA:         s.token == "" && s.cfg.StravaClientID != "",
+		Authorized:           s.token != "",
+		DiscoveredMapEnabled: s.cfg.DiscoveredMapEnabled,
 	}
 
 	if err := s.executeTemplate(w, "segments.html", data); err != nil {
@@ -1338,19 +1524,19 @@ func (s *server) handleSegmentPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		Segment             *pggeo.FavoriteSegment
-		Athlete             *strava.Athlete
-		ShowLoginCTA        bool
-		Authorized          bool
-		MapboxToken         string
-		MobileActivityOrder string
+		Segment              *pggeo.FavoriteSegment
+		Athlete              *strava.Athlete
+		ShowLoginCTA         bool
+		Authorized           bool
+		MobileActivityOrder  string
+		DiscoveredMapEnabled bool
 	}{
-		Segment:             segment,
-		Athlete:             s.user,
-		ShowLoginCTA:        s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:          s.token != "",
-		MapboxToken:         s.cfg.MapboxToken,
-		MobileActivityOrder: s.cfg.MobileActivityOrder,
+		Segment:              segment,
+		Athlete:              s.user,
+		ShowLoginCTA:         s.token == "" && s.cfg.StravaClientID != "",
+		Authorized:           s.token != "",
+		MobileActivityOrder:  s.cfg.MobileActivityOrder,
+		DiscoveredMapEnabled: s.cfg.DiscoveredMapEnabled,
 	}
 
 	if err := s.executeTemplate(w, "segment.html", data); err != nil {
@@ -1415,31 +1601,33 @@ func (s *server) handleProfilePage(w http.ResponseWriter, r *http.Request) {
 	bestMonth, bestYear := findBusiestPeriods(activities)
 
 	data := struct {
-		Athlete           *strava.Athlete
-		ShowLoginCTA      bool
-		Authorized        bool
-		HRZones           []profileHRZone
-		HRZonesError      string
-		TotalBikeKM       float64
-		TotalActivities   int
-		BikeStats         []profileBikeStat
-		BestMonth         profilePeriodStat
-		BestYear          profilePeriodStat
-		HasRecordedRides  bool
-		HasRecordedMonths bool
+		Athlete              *strava.Athlete
+		ShowLoginCTA         bool
+		Authorized           bool
+		HRZones              []profileHRZone
+		HRZonesError         string
+		TotalBikeKM          float64
+		TotalActivities      int
+		BikeStats            []profileBikeStat
+		BestMonth            profilePeriodStat
+		BestYear             profilePeriodStat
+		HasRecordedRides     bool
+		HasRecordedMonths    bool
+		DiscoveredMapEnabled bool
 	}{
-		Athlete:           s.user,
-		ShowLoginCTA:      s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:        s.token != "",
-		HRZones:           zones,
-		HRZonesError:      zonesError,
-		TotalBikeKM:       totalBikeKM,
-		TotalActivities:   len(activities),
-		BikeStats:         bikeStats,
-		BestMonth:         bestMonth,
-		BestYear:          bestYear,
-		HasRecordedRides:  len(bikeStats) > 0,
-		HasRecordedMonths: bestMonth.Activities > 0 || bestYear.Activities > 0,
+		Athlete:              s.user,
+		ShowLoginCTA:         s.token == "" && s.cfg.StravaClientID != "",
+		Authorized:           s.token != "",
+		HRZones:              zones,
+		HRZonesError:         zonesError,
+		TotalBikeKM:          totalBikeKM,
+		TotalActivities:      len(activities),
+		BikeStats:            bikeStats,
+		BestMonth:            bestMonth,
+		BestYear:             bestYear,
+		HasRecordedRides:     len(bikeStats) > 0,
+		HasRecordedMonths:    bestMonth.Activities > 0 || bestYear.Activities > 0,
+		DiscoveredMapEnabled: s.cfg.DiscoveredMapEnabled,
 	}
 
 	if err := s.executeTemplate(w, "profile.html", data); err != nil {

@@ -15,6 +15,13 @@ type SyncConfig struct {
 	StravaAccessToken string
 	DatabaseConfig    DatabaseConfig
 	Timeframe         TimeframeConfig
+	DiscoveredMap     DiscoveredMapConfig
+}
+
+type DiscoveredMapConfig struct {
+	Enabled              bool
+	RevealRadiusMeters   float64
+	SampleDistanceMeters float64
 }
 
 // DatabaseConfig holds database connection configuration
@@ -222,6 +229,25 @@ func SyncActivitiesFromStrava(ctx context.Context, config SyncConfig, progressCa
 		log.Printf("⚠️ Total errors encountered: %d", len(result.Errors))
 	}
 
+	if config.DiscoveredMap.Enabled && result.SuccessfullyProcessed > 0 {
+		if progressCallback != nil {
+			progressCallback("discovered", 0, 1, "Rebuilding discovered map coverage...")
+		}
+		log.Printf("🗺️ Rebuilding discovered map coverage for athlete %d", athlete.ID)
+		if _, err := pggeo.RebuildDiscoveredCoverage(ctx, conn, athlete.ID, config.DiscoveredMap.SampleDistanceMeters, config.DiscoveredMap.RevealRadiusMeters); err != nil {
+			log.Printf("⚠️ Failed to rebuild discovered map coverage: %v", err)
+			result.Errors = append(result.Errors, fmt.Errorf("failed to rebuild discovered map coverage: %w", err))
+			if progressCallback != nil {
+				progressCallback("discovered", 1, 1, "Discovered map rebuild failed")
+			}
+		} else {
+			if progressCallback != nil {
+				progressCallback("discovered", 1, 1, "Discovered map coverage rebuilt")
+			}
+			log.Printf("✅ Discovered map coverage rebuilt")
+		}
+	}
+
 	return result, nil
 }
 
@@ -271,6 +297,8 @@ func SyncActivitiesFromStravaWithRetry(ctx context.Context, config SyncConfig, m
 	if len(result.FailedActivities) == 0 {
 		return result, nil
 	}
+	successesBeforeRetry := result.SuccessfullyProcessed
+	var retryAthleteID int64
 
 	// Retry failed activities
 	for attempt := 1; attempt <= maxRetries && len(result.FailedActivities) > 0; attempt++ {
@@ -306,6 +334,7 @@ func SyncActivitiesFromStravaWithRetry(ctx context.Context, config SyncConfig, m
 			}
 
 			log.Printf("✅ Retry successful for activity %d", activityID)
+			retryAthleteID = detailedActivities[0].Summary.AthleteID
 			result.SuccessfullyProcessed++
 		}
 
@@ -320,6 +349,27 @@ func SyncActivitiesFromStravaWithRetry(ctx context.Context, config SyncConfig, m
 		// Wait before next retry
 		if attempt < maxRetries {
 			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+	}
+
+	if config.DiscoveredMap.Enabled && result.SuccessfullyProcessed > successesBeforeRetry && retryAthleteID != 0 {
+		conn, err := pggeo.Connect(ctx, config.DatabaseConfig.User, config.DatabaseConfig.Password,
+			config.DatabaseConfig.Host, config.DatabaseConfig.Port, config.DatabaseConfig.Database)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("failed to connect for discovered map retry rebuild: %w", err))
+			return result, nil
+		}
+		defer conn.Close(ctx)
+		if progressCallback != nil {
+			progressCallback("discovered", 0, 1, "Rebuilding discovered map coverage after retries...")
+		}
+		if _, err := pggeo.RebuildDiscoveredCoverage(ctx, conn, retryAthleteID, config.DiscoveredMap.SampleDistanceMeters, config.DiscoveredMap.RevealRadiusMeters); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("failed to rebuild discovered map coverage after retries: %w", err))
+			if progressCallback != nil {
+				progressCallback("discovered", 1, 1, "Discovered map rebuild failed after retries")
+			}
+		} else if progressCallback != nil {
+			progressCallback("discovered", 1, 1, "Discovered map coverage rebuilt after retries")
 		}
 	}
 

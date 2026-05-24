@@ -31,6 +31,14 @@ func CreateTables(ctx context.Context, conn *pgx.Conn) error {
 		return fmt.Errorf("failed to create segment activity matches table: %w", err)
 	}
 
+	if err := createDiscoveredActivityBuffersTable(ctx, conn); err != nil {
+		return fmt.Errorf("failed to create discovered activity buffers table: %w", err)
+	}
+
+	if err := createDiscoveredCoverageCacheTable(ctx, conn); err != nil {
+		return fmt.Errorf("failed to create discovered coverage cache table: %w", err)
+	}
+
 	if err := createHelperFunctions(ctx, conn); err != nil {
 		return fmt.Errorf("failed to create helper functions: %w", err)
 	}
@@ -40,6 +48,8 @@ func CreateTables(ctx context.Context, conn *pgx.Conn) error {
 
 func TruncateTables(ctx context.Context, conn *pgx.Conn) error {
 	tables := []string{
+		"discovered_coverage_cache",
+		"discovered_activity_buffers",
 		"point_samples",
 		"activity_geometries",
 		"activity_summaries",
@@ -62,10 +72,12 @@ func DropAndRecreateTables(ctx context.Context, conn *pgx.Conn) error {
 	// so it needs to be dropped before those, but CASCADE will handle it anyway
 	tables := []string{
 		"segment_activity_matches", // Cache table with foreign keys
-		"point_samples",            // Depends on activity_summaries
-		"activity_geometries",      // Depends on activity_summaries
-		"favorite_segments",        // Independent but referenced by segment_activity_matches
-		"activity_summaries",       // Base table
+		"discovered_coverage_cache",
+		"discovered_activity_buffers",
+		"point_samples",       // Depends on activity_summaries
+		"activity_geometries", // Depends on activity_summaries
+		"favorite_segments",   // Independent but referenced by segment_activity_matches
+		"activity_summaries",  // Base table
 	}
 
 	log.Printf("🗑️ Dropping %d tables...", len(tables))
@@ -813,6 +825,77 @@ func createHelperFunctions(ctx context.Context, conn *pgx.Conn) error {
 	return nil
 }
 
+func createDiscoveredActivityBuffersTable(ctx context.Context, conn *pgx.Conn) error {
+	query := `
+	CREATE TABLE IF NOT EXISTS discovered_activity_buffers (
+		activity_id BIGINT PRIMARY KEY REFERENCES activity_summaries(id) ON DELETE CASCADE,
+		athlete_id BIGINT NOT NULL,
+		sample_distance_m DOUBLE PRECISION NOT NULL,
+		radius_m DOUBLE PRECISION NOT NULL,
+		route_geog GEOGRAPHY(LINESTRING, 4326) NOT NULL,
+		buffer_geog GEOGRAPHY(MULTIPOLYGON, 4326) NOT NULL,
+		buffer_bbox_geom GEOMETRY(POLYGON, 4326)
+			GENERATED ALWAYS AS (ST_Envelope(buffer_geog::GEOMETRY)) STORED,
+		created_at TIMESTAMPTZ DEFAULT NOW(),
+		updated_at TIMESTAMPTZ DEFAULT NOW()
+	)`
+
+	if _, err := conn.Exec(ctx, query); err != nil {
+		return err
+	}
+
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_discovered_activity_buffers_athlete_id ON discovered_activity_buffers (athlete_id)",
+		"CREATE INDEX IF NOT EXISTS idx_discovered_activity_buffers_buffer_geog ON discovered_activity_buffers USING GIST (buffer_geog)",
+		"CREATE INDEX IF NOT EXISTS idx_discovered_activity_buffers_bbox ON discovered_activity_buffers USING GIST (buffer_bbox_geom)",
+		"CREATE INDEX IF NOT EXISTS idx_discovered_activity_buffers_params ON discovered_activity_buffers (athlete_id, sample_distance_m, radius_m)",
+	}
+
+	for _, indexQuery := range indexes {
+		if _, err := conn.Exec(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create discovered activity buffer index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func createDiscoveredCoverageCacheTable(ctx context.Context, conn *pgx.Conn) error {
+	query := `
+	CREATE TABLE IF NOT EXISTS discovered_coverage_cache (
+		athlete_id BIGINT PRIMARY KEY,
+		sample_distance_m DOUBLE PRECISION NOT NULL,
+		radius_m DOUBLE PRECISION NOT NULL,
+		activity_count INTEGER NOT NULL DEFAULT 0,
+		coverage_geog GEOGRAPHY(MULTIPOLYGON, 4326),
+		coverage_bbox_geom GEOMETRY(POLYGON, 4326)
+			GENERATED ALWAYS AS (ST_Envelope(coverage_geog::GEOMETRY)) STORED,
+		stale BOOLEAN NOT NULL DEFAULT TRUE,
+		rebuilt_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ DEFAULT NOW(),
+		updated_at TIMESTAMPTZ DEFAULT NOW()
+	)`
+
+	if _, err := conn.Exec(ctx, query); err != nil {
+		return err
+	}
+
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_discovered_coverage_cache_coverage_geog ON discovered_coverage_cache USING GIST (coverage_geog)",
+		"CREATE INDEX IF NOT EXISTS idx_discovered_coverage_cache_bbox ON discovered_coverage_cache USING GIST (coverage_bbox_geom)",
+		"CREATE INDEX IF NOT EXISTS idx_discovered_coverage_cache_params ON discovered_coverage_cache (athlete_id, sample_distance_m, radius_m)",
+		"CREATE INDEX IF NOT EXISTS idx_discovered_coverage_cache_stale ON discovered_coverage_cache (stale)",
+	}
+
+	for _, indexQuery := range indexes {
+		if _, err := conn.Exec(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create discovered coverage cache index: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // TableSchema represents the expected schema for a table
 type TableSchema struct {
 	Name        string
@@ -1307,6 +1390,49 @@ func GetExpectedTableSchemas() []TableSchema {
 				"idx_segment_activity_matches_cached_at",
 			},
 		},
+		{
+			Name:    "discovered_activity_buffers",
+			IsCache: true,
+			Columns: []ColumnDef{
+				{Name: "activity_id", Type: "bigint", Nullable: false},
+				{Name: "athlete_id", Type: "bigint", Nullable: false},
+				{Name: "sample_distance_m", Type: "double precision", Nullable: false},
+				{Name: "radius_m", Type: "double precision", Nullable: false},
+				{Name: "route_geog", Type: "geography", Nullable: false},
+				{Name: "buffer_geog", Type: "geography", Nullable: false},
+				{Name: "buffer_bbox_geom", Type: "geometry", Nullable: true},
+				{Name: "created_at", Type: "timestamp with time zone", Nullable: true},
+				{Name: "updated_at", Type: "timestamp with time zone", Nullable: true},
+			},
+			Indexes: []string{
+				"idx_discovered_activity_buffers_athlete_id",
+				"idx_discovered_activity_buffers_buffer_geog",
+				"idx_discovered_activity_buffers_bbox",
+				"idx_discovered_activity_buffers_params",
+			},
+		},
+		{
+			Name:    "discovered_coverage_cache",
+			IsCache: true,
+			Columns: []ColumnDef{
+				{Name: "athlete_id", Type: "bigint", Nullable: false},
+				{Name: "sample_distance_m", Type: "double precision", Nullable: false},
+				{Name: "radius_m", Type: "double precision", Nullable: false},
+				{Name: "activity_count", Type: "integer", Nullable: false},
+				{Name: "coverage_geog", Type: "geography", Nullable: true},
+				{Name: "coverage_bbox_geom", Type: "geometry", Nullable: true},
+				{Name: "stale", Type: "boolean", Nullable: false},
+				{Name: "rebuilt_at", Type: "timestamp with time zone", Nullable: true},
+				{Name: "created_at", Type: "timestamp with time zone", Nullable: true},
+				{Name: "updated_at", Type: "timestamp with time zone", Nullable: true},
+			},
+			Indexes: []string{
+				"idx_discovered_coverage_cache_coverage_geog",
+				"idx_discovered_coverage_cache_bbox",
+				"idx_discovered_coverage_cache_params",
+				"idx_discovered_coverage_cache_stale",
+			},
+		},
 	}
 }
 
@@ -1325,6 +1451,10 @@ func createTableBySchema(ctx context.Context, conn *pgx.Conn, schema TableSchema
 		return createFavoriteSegmentsTable(ctx, conn)
 	case "segment_activity_matches":
 		return createSegmentActivityMatchesTable(ctx, conn)
+	case "discovered_activity_buffers":
+		return createDiscoveredActivityBuffersTable(ctx, conn)
+	case "discovered_coverage_cache":
+		return createDiscoveredCoverageCacheTable(ctx, conn)
 	default:
 		return fmt.Errorf("unknown table schema: %s", schema.Name)
 	}

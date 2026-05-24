@@ -3,6 +3,7 @@
   <div class="topbar-left">
     <a class="link" href="/strava/">Activities</a>
     <a class="link" href="/segments">Segments</a>
+    {{if and .Authorized .DiscoveredMapEnabled}}<a class="link" href="/discovered">Discovered</a>{{end}}
     {{if .Authorized}}<a class="link" href="/profile">Profile</a>{{end}}
   </div>
   <div class="topbar-right">

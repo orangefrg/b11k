@@ -8,3 +8,6 @@ web_port: 8080
 web_protocol: http
 dev_reload_templates: false
 mobile_activity_order: stats_first
+discovered_map_enabled: true
+discovered_reveal_radius_meters: 100
+discovered_sample_distance_meters: 50
