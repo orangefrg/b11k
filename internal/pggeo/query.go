@@ -253,7 +253,7 @@ func GetPointSamplesForActivity(ctx context.Context, conn *pgx.Conn, athleteID, 
 	query := `
 	SELECT id, activity_id, athlete_id, point_index, time, 
 		   ST_Y(location::geometry) as lat, ST_X(location::geometry) as lng,
-		   altitude, heartrate, speed, watts, cadence, grade, moving, cumulative_distance
+		   altitude, heartrate, speed, watts, cadence, grade, moving, temperature, cumulative_distance
 	FROM point_samples
 	WHERE athlete_id = $1 AND activity_id = $2
 	ORDER BY point_index
@@ -272,13 +272,46 @@ func GetPointSamplesForActivity(ctx context.Context, conn *pgx.Conn, athleteID, 
 			&sample.ID, &sample.ActivityID, &sample.AthleteID, &sample.PointIndex, &sample.Time,
 			&sample.Lat, &sample.Lng, &sample.Altitude, &sample.Heartrate,
 			&sample.Speed, &sample.Watts, &sample.Cadence, &sample.Grade, &sample.Moving,
-			&sample.CumulativeDistance,
+			&sample.Temperature, &sample.CumulativeDistance,
 		)
 
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan point sample: %w", err)
 		}
 
+		samples = append(samples, sample)
+	}
+
+	return samples, rows.Err()
+}
+
+// GetRoutePointsForActivity retrieves route coordinates from the stored activity geometry.
+func GetRoutePointsForActivity(ctx context.Context, conn *pgx.Conn, athleteID, activityID int64) ([]PointSample, error) {
+	query := `
+	SELECT
+		(dp.path[1] - 1)::integer AS point_index,
+		ST_Y(dp.geom) AS lat,
+		ST_X(dp.geom) AS lng
+	FROM activity_geometries g
+	CROSS JOIN LATERAL ST_DumpPoints(g.route_geog::geometry) AS dp
+	WHERE g.athlete_id = $1 AND g.activity_id = $2
+	ORDER BY dp.path
+	`
+
+	rows, err := conn.Query(ctx, query, athleteID, activityID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query route geometry points: %w", err)
+	}
+	defer rows.Close()
+
+	var samples []PointSample
+	for rows.Next() {
+		var sample PointSample
+		sample.ActivityID = activityID
+		sample.AthleteID = athleteID
+		if err := rows.Scan(&sample.PointIndex, &sample.Lat, &sample.Lng); err != nil {
+			return nil, fmt.Errorf("failed to scan route geometry point: %w", err)
+		}
 		samples = append(samples, sample)
 	}
 
@@ -556,6 +589,7 @@ type PointSample struct {
 	Cadence            *int      `json:"cadence,omitempty"`
 	Grade              *float64  `json:"grade,omitempty"`
 	Moving             *bool     `json:"moving,omitempty"`
+	Temperature        *int      `json:"temperature,omitempty"`
 	CumulativeDistance *float64  `json:"cumulative_distance,omitempty"`
 }
 

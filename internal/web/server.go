@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,14 +28,18 @@ type Config struct {
 	StravaClientID                 string
 	StravaClientSecret             string
 	StravaRedirectURI              string
+	IOSRedirectURI                 string
 	PGIP                           string
 	PGPort                         string
 	PGUser                         string
 	PGPassword                     string
 	PGDatabase                     string
 	WebHost                        string
+	PublicAPIHost                  string
 	WebPort                        string
 	WebProtocol                    string
+	TokenEncryptionKey             string
+	EnableDevAPI                   bool
 	DevReloadTemplates             bool
 	MobileActivityOrder            string
 	DiscoveredMapEnabled           bool
@@ -50,12 +55,51 @@ type server struct {
 	tmpl   *template.Template
 	token  string
 	user   *strava.Athlete
+
+	mobileMu          syncpkg.Mutex
+	mobileSessions    map[string]mobileSession
+	mobileAuthStates  map[string]time.Time
+	mobileAuthResults map[string]mobileAuthResult
+	rateMu            syncpkg.Mutex
+	rateLimits        map[string]rateLimitEntry
+	secretBox         *secretBox
 }
 
 const stravaTokenCookieName = "strava_token"
+const mobileSessionLifetime = 90 * 24 * time.Hour
+
+type mobileSession struct {
+	SessionToken     string
+	Token            string
+	RefreshToken     string
+	ExpiresAt        time.Time
+	SessionExpiresAt time.Time
+	Athlete          *strava.Athlete
+	CreatedAt        time.Time
+}
+
+type mobileAuthResult struct {
+	SessionToken string
+	Athlete      *strava.Athlete
+	Error        string
+	ExpiresAt    time.Time
+}
+
+type rateLimitEntry struct {
+	Count   int
+	ResetAt time.Time
+}
 
 func RunServer(ctx context.Context, cfg Config) {
 	log.Printf("🌐 Starting web server on port %s", cfg.WebPort)
+
+	secretBox, err := newSecretBox(cfg.TokenEncryptionKey)
+	if err != nil {
+		log.Fatalf("Invalid token encryption key: %v", err)
+	}
+	if requiresTokenEncryption(cfg) && secretBox == nil {
+		log.Fatalf("B11K_TOKEN_ENCRYPTION_KEY is required when exposing the mobile API over public HTTPS")
+	}
 
 	conn, err := pggeo.Connect(ctx, cfg.PGUser, cfg.PGPassword, cfg.PGIP, cfg.PGPort, cfg.PGDatabase)
 	if err != nil {
@@ -72,39 +116,277 @@ func RunServer(ctx context.Context, cfg Config) {
 		log.Fatalf("parse templates: %v", err)
 	}
 
-	s := &server{ctx: ctx, cfg: cfg, conn: conn, tmpl: tmpl}
+	s := &server{
+		ctx:               ctx,
+		cfg:               cfg,
+		conn:              conn,
+		tmpl:              tmpl,
+		mobileSessions:    make(map[string]mobileSession),
+		mobileAuthStates:  make(map[string]time.Time),
+		mobileAuthResults: make(map[string]mobileAuthResult),
+		rateLimits:        make(map[string]rateLimitEntry),
+		secretBox:         secretBox,
+	}
 	if cfg.DevReloadTemplates {
 		log.Printf("🔁 Dev template reload enabled")
 	}
+	if secretBox != nil {
+		log.Printf("🔒 Strava token encryption at rest enabled")
+	}
+	if cfg.PublicAPIHost != "" {
+		log.Printf("🔐 Public API host configured: %s", cfg.PublicAPIHost)
+	}
+	if cfg.EnableDevAPI {
+		log.Printf("🧪 Dev API enabled for local/private network requests")
+	}
 
 	// Routes
-	http.HandleFunc("/", s.handleIndex)
-	http.HandleFunc("/strava/", s.handleStravaHome)
-	http.HandleFunc("/strava/login", s.handleStravaLogin)
-	http.HandleFunc("/activity/", s.handleActivity)
-	http.HandleFunc("/api/activities", s.handleActivitiesAPI)
-	http.HandleFunc("/api/activities/", s.handleActivityPointsAPI)
-	http.HandleFunc("/strava/callback", s.handleStravaCallback)
-	http.HandleFunc("/strava/logout", s.handleStravaLogout)
-	http.HandleFunc("/api/hrzones", s.handleHRZones)
-	http.HandleFunc("/strava/sync", s.handleStravaSyncSSE)
-	http.HandleFunc("/api/segments", s.handleSegmentsAPI)
-	http.HandleFunc("/api/segments/", s.handleSegmentAPI)
-	http.HandleFunc("/segments", s.handleSegmentsPage)
-	http.HandleFunc("/segment/", s.handleSegmentPage)
-	http.HandleFunc("/profile", s.handleProfilePage)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/strava/", s.handleStravaHome)
+	mux.HandleFunc("/strava/login", s.handleStravaLogin)
+	mux.HandleFunc("/activity/", s.handleActivity)
+	mux.HandleFunc("/api/activities", s.handleActivitiesAPI)
+	mux.HandleFunc("/api/activities/", s.handleActivityPointsAPI)
+	mux.HandleFunc("/strava/callback", s.handleStravaCallback)
+	mux.HandleFunc("/strava/logout", s.handleStravaLogout)
+	mux.HandleFunc("/api/hrzones", s.handleHRZones)
+	mux.HandleFunc("/api/mobile/auth/start", s.handleMobileAuthStart)
+	mux.HandleFunc("/api/mobile/auth/exchange", s.handleMobileAuthExchange)
+	mux.HandleFunc("/api/mobile/auth/callback", s.handleMobileAuthCallback)
+	mux.HandleFunc("/api/mobile/auth/session", s.handleMobileAuthSession)
+	mux.HandleFunc("/api/mobile/me", s.handleMobileMe)
+	mux.HandleFunc("/api/mobile/sync", s.handleMobileSync)
+	mux.HandleFunc("/api/mobile/dev/rebuild-sync", s.handleMobileDevRebuildSync)
+	mux.HandleFunc("/api/mobile/activities", s.handleMobileActivities)
+	mux.HandleFunc("/api/mobile/activities/", s.handleMobileActivities)
+	mux.HandleFunc("/strava/sync", s.handleStravaSyncSSE)
+	mux.HandleFunc("/api/segments", s.handleSegmentsAPI)
+	mux.HandleFunc("/api/segments/", s.handleSegmentAPI)
+	mux.HandleFunc("/segments", s.handleSegmentsPage)
+	mux.HandleFunc("/segment/", s.handleSegmentPage)
+	mux.HandleFunc("/profile", s.handleProfilePage)
 	if cfg.DiscoveredMapEnabled {
-		http.HandleFunc("/discovered", s.handleDiscoveredPage)
-		http.HandleFunc("/api/discovered/", s.handleDiscoveredAPI)
+		mux.HandleFunc("/discovered", s.handleDiscoveredPage)
+		mux.HandleFunc("/api/discovered/", s.handleDiscoveredAPI)
 	}
 
 	// static
-	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(filepath.FromSlash("web/static")))))
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(filepath.FromSlash("web/static")))))
 
 	addr := ":" + strings.TrimPrefix(cfg.WebPort, ":")
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := http.ListenAndServe(addr, s.securityMiddleware(mux)); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+func (s *server) securityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		w.Header().Set("X-Frame-Options", "DENY")
+
+		if !s.isRequestAllowed(r) {
+			http.NotFound(w, r)
+			return
+		}
+		if !s.isPublicRequestTransportAllowed(r) {
+			http.Error(w, "HTTPS is required", http.StatusForbidden)
+			return
+		}
+		if s.isDisallowedBrowserMobileAPIRequest(r) {
+			http.Error(w, "browser origins are not allowed for mobile API", http.StatusForbidden)
+			return
+		}
+		if !s.allowRequestRate(w, r) {
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/mobile/") {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Pragma", "no-cache")
+			if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+				r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+			}
+		}
+		if s.isHTTPSRequest(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *server) isRequestAllowed(r *http.Request) bool {
+	path := r.URL.Path
+	if path == "/api/mobile/auth/callback" {
+		return true
+	}
+	if strings.HasPrefix(path, "/api/mobile/dev/") {
+		return s.cfg.EnableDevAPI && isLocalOrPrivateHost(requestHost(r))
+	}
+
+	apiHost := normalizeHost(s.cfg.PublicAPIHost)
+	if apiHost == "" {
+		return true
+	}
+	host := normalizeHost(requestHost(r))
+	if host == "" || isLocalOrPrivateHost(host) {
+		return true
+	}
+	if host == apiHost {
+		return strings.HasPrefix(path, "/api/mobile/")
+	}
+	if strings.HasPrefix(path, "/api/mobile/") {
+		return false
+	}
+	return true
+}
+
+func (s *server) isPublicRequestTransportAllowed(r *http.Request) bool {
+	if isLocalOrPrivateHost(requestHost(r)) {
+		return true
+	}
+	if s.cfg.WebProtocol != "https" {
+		return true
+	}
+	return s.isHTTPSRequest(r)
+}
+
+func (s *server) isHTTPSRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("CF-Visitor")), `"scheme":"https"`) {
+		return true
+	}
+	return false
+}
+
+func (s *server) isDisallowedBrowserMobileAPIRequest(r *http.Request) bool {
+	if !strings.HasPrefix(r.URL.Path, "/api/mobile/") {
+		return false
+	}
+	if r.URL.Path == "/api/mobile/auth/callback" {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	return origin != ""
+}
+
+func (s *server) allowRequestRate(w http.ResponseWriter, r *http.Request) bool {
+	path := r.URL.Path
+	if !strings.HasPrefix(path, "/api/mobile/") && path != "/strava/login" && path != "/strava/callback" {
+		return true
+	}
+
+	limit := 180
+	window := time.Minute
+	bucket := "mobile"
+	switch {
+	case strings.HasPrefix(path, "/api/mobile/auth/"):
+		limit = 40
+		bucket = "mobile-auth"
+	case path == "/api/mobile/sync":
+		limit = 12
+		window = time.Hour
+		bucket = "mobile-sync"
+	case path == "/strava/login" || path == "/strava/callback":
+		limit = 40
+		bucket = "web-auth"
+	}
+
+	key := clientIP(r) + ":" + bucket
+	ok, retryAfter := s.consumeRateLimit(key, limit, window)
+	if ok {
+		return true
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+	http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+	return false
+}
+
+func (s *server) consumeRateLimit(key string, limit int, window time.Duration) (bool, time.Duration) {
+	now := time.Now()
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+
+	if s.rateLimits == nil {
+		s.rateLimits = make(map[string]rateLimitEntry)
+	}
+	entry := s.rateLimits[key]
+	if entry.ResetAt.IsZero() || now.After(entry.ResetAt) {
+		s.rateLimits[key] = rateLimitEntry{Count: 1, ResetAt: now.Add(window)}
+		s.pruneRateLimitsLocked(now)
+		return true, 0
+	}
+	if entry.Count >= limit {
+		return false, time.Until(entry.ResetAt)
+	}
+	entry.Count++
+	s.rateLimits[key] = entry
+	return true, 0
+}
+
+func (s *server) pruneRateLimitsLocked(now time.Time) {
+	if len(s.rateLimits) < 1000 {
+		return
+	}
+	for key, entry := range s.rateLimits {
+		if now.After(entry.ResetAt) {
+			delete(s.rateLimits, key)
+		}
+	}
+}
+
+func requestHost(r *http.Request) string {
+	if forwardedHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
+		return strings.Split(forwardedHost, ",")[0]
+	}
+	return r.Host
+}
+
+func clientIP(r *http.Request) string {
+	if value := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); value != "" {
+		return strings.TrimSpace(strings.Split(value, ",")[0])
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func normalizeHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimPrefix(host, "http://")
+	host = strings.TrimPrefix(host, "https://")
+	if strings.HasPrefix(host, "[") {
+		end := strings.Index(host, "]")
+		if end >= 0 {
+			return strings.Trim(host[:end+1], "[]")
+		}
+	}
+	if idx := strings.LastIndex(host, ":"); idx > -1 {
+		host = host[:idx]
+	}
+	return host
+}
+
+func isLocalOrPrivateHost(host string) bool {
+	host = normalizeHost(host)
+	if host == "localhost" || host == "" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
 }
 
 func parseTemplates() (*template.Template, error) {
@@ -818,7 +1100,7 @@ func (s *server) handleStravaCallback(w http.ResponseWriter, r *http.Request) {
 		Value:    tok,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   false, // Set to true in production with HTTPS
+		Secure:   s.secureCookies(r),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   60 * 60 * 24 * 30, // 30 days
 	})
@@ -842,7 +1124,7 @@ func (s *server) handleStravaLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   false, // Set to true in production with HTTPS
+		Secure:   s.secureCookies(r),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1, // Expire immediately
 	})
@@ -856,6 +1138,10 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
+}
+
+func (s *server) secureCookies(r *http.Request) bool {
+	return s.cfg.WebProtocol == "https" || s.isHTTPSRequest(r)
 }
 
 func (s *server) handleDiscoveredPage(w http.ResponseWriter, r *http.Request) {

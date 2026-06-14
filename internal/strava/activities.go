@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -84,15 +85,17 @@ type BikeActivity struct {
 		SummaryPolyline string `json:"summary_polyline"`
 	} `json:"map"`
 
-	TimeStream      TimeStream
-	LatLngStream    LatLngStream
-	AltitudeStream  AltitudeStream
-	HeartrateStream HeartrateStream
-	SpeedStream     SpeedStream
-	WattsStream     WattsStream
-	CadenceStream   CadenceStream
-	GradeStream     GradeStream
-	MovingStream    MovingStream
+	TimeStream        TimeStream
+	LatLngStream      LatLngStream
+	AltitudeStream    AltitudeStream
+	HeartrateStream   HeartrateStream
+	SpeedStream       SpeedStream
+	WattsStream       WattsStream
+	CadenceStream     CadenceStream
+	GradeStream       GradeStream
+	MovingStream      MovingStream
+	DistanceStream    DistanceStream
+	TemperatureStream TemperatureStream
 }
 
 type Gear struct {
@@ -136,12 +139,34 @@ type MovingStream struct {
 	Data []bool
 }
 
+type DistanceStream struct {
+	Data []float64
+}
+
+type TemperatureStream struct {
+	Data []int
+}
+
 type RawStravaStream struct {
 	Type         string        `json:"type"`
 	Data         []interface{} `json:"data"`
 	Series       string        `json:"series_type"`
 	OriginalSize int           `json:"original_size"`
 	Resolution   string        `json:"resolution"`
+}
+
+var activityStreamKeys = []string{
+	"time",
+	"latlng",
+	"distance",
+	"altitude",
+	"heartrate",
+	"velocity_smooth",
+	"watts",
+	"cadence",
+	"grade_smooth",
+	"moving",
+	"temp",
 }
 
 func (b *ActivitySummaryList) UnmarshalJSON(data []byte) error {
@@ -277,8 +302,8 @@ func (a *ActivitySummaryList) GetDetailedActivities(accessToken string) (BikeAct
 	client := &http.Client{Timeout: 30 * time.Second}
 	for _, activity := range *a {
 		fmt.Printf("Fetching detailed activity %d (%s)...\n", activity.ID, activity.Name)
-		url := fmt.Sprintf("https://www.strava.com/api/v3/activities/%d", activity.ID)
-		req, err := http.NewRequest("GET", url, nil)
+		activityURL := fmt.Sprintf("https://www.strava.com/api/v3/activities/%d", activity.ID)
+		req, err := http.NewRequest("GET", activityURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -304,7 +329,10 @@ func (a *ActivitySummaryList) GetDetailedActivities(accessToken string) (BikeAct
 			detailedActivity.Summary.GearName = &detailedActivity.Gear.Name
 		}
 		time.Sleep(100 * time.Millisecond)
-		streamUrl := fmt.Sprintf("https://www.strava.com/api/v3/activities/%d/streams?keys=time,latlng,altitude,heartrate,velocity_smooth,watts,cadence,grade_smooth,moving", activity.ID)
+		streamParams := url.Values{}
+		streamParams.Set("keys", strings.Join(activityStreamKeys, ","))
+		streamParams.Set("key_by_type", "true")
+		streamUrl := fmt.Sprintf("https://www.strava.com/api/v3/activities/%d/streams?%s", activity.ID, streamParams.Encode())
 		req, err = http.NewRequest("GET", streamUrl, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request: %v", err)
@@ -322,17 +350,39 @@ func (a *ActivitySummaryList) GetDetailedActivities(accessToken string) (BikeAct
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("failed to fetch streams with status %d: %s", resp.StatusCode, string(body))
 		}
-		var streams []RawStravaStream
-		if err := json.Unmarshal(body, &streams); err != nil {
+		streams, err := decodeRawStravaStreams(body)
+		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal streams: %v", err)
 		}
 		if err := detailedActivity.AddStreams(streams); err != nil {
 			return nil, fmt.Errorf("failed to add streams: %v", err)
 		}
+		fmt.Print(detailedActivity.StreamsSummary())
 		detailedActivities = append(detailedActivities, detailedActivity)
 
 	}
 	return detailedActivities, nil
+}
+
+func decodeRawStravaStreams(body []byte) ([]RawStravaStream, error) {
+	var streams []RawStravaStream
+	if err := json.Unmarshal(body, &streams); err == nil {
+		return streams, nil
+	}
+
+	var keyedStreams map[string]RawStravaStream
+	if err := json.Unmarshal(body, &keyedStreams); err != nil {
+		return nil, err
+	}
+
+	streams = make([]RawStravaStream, 0, len(keyedStreams))
+	for key, stream := range keyedStreams {
+		if stream.Type == "" {
+			stream.Type = key
+		}
+		streams = append(streams, stream)
+	}
+	return streams, nil
 }
 
 func (b *BikeActivity) AddStreams(streams []RawStravaStream) error {
@@ -466,24 +516,62 @@ func (b *BikeActivity) AddStreams(streams []RawStravaStream) error {
 				movingStream.Data[i] = curMoving
 			}
 			b.MovingStream = movingStream
+		case "distance":
+			distanceStream := DistanceStream{
+				Data: make([]float64, len(stream.Data)),
+			}
+			for i, data := range stream.Data {
+				curDistance, ok := data.(float64)
+				if !ok {
+					return fmt.Errorf("invalid distance data: %v, type: %T, could not convert to float64", data, data)
+				}
+				distanceStream.Data[i] = curDistance
+			}
+			b.DistanceStream = distanceStream
+		case "temp":
+			temperatureStream := TemperatureStream{
+				Data: make([]int, len(stream.Data)),
+			}
+			for i, data := range stream.Data {
+				var curTemperature int
+				switch v := data.(type) {
+				case int:
+					curTemperature = v
+				case float64:
+					curTemperature = int(v)
+				default:
+					return fmt.Errorf("invalid temp data: %v, type: %T, could not convert to int", data, data)
+				}
+				temperatureStream.Data[i] = curTemperature
+			}
+			b.TemperatureStream = temperatureStream
 		}
 	}
 	return nil
+}
+
+func (b *BikeActivity) StreamsSummary() string {
+	sb := strings.Builder{}
+	sb.WriteString(fmt.Sprintf("   Streams for %d: ", b.Summary.ID))
+	sb.WriteString(fmt.Sprintf("time=%d ", len(b.TimeStream.Data)))
+	sb.WriteString(fmt.Sprintf("latlng=%d ", len(b.LatLngStream.Data)))
+	sb.WriteString(fmt.Sprintf("distance=%d ", len(b.DistanceStream.Data)))
+	sb.WriteString(fmt.Sprintf("altitude=%d ", len(b.AltitudeStream.Data)))
+	sb.WriteString(fmt.Sprintf("heartrate=%d ", len(b.HeartrateStream.Data)))
+	sb.WriteString(fmt.Sprintf("speed=%d ", len(b.SpeedStream.Data)))
+	sb.WriteString(fmt.Sprintf("watts=%d ", len(b.WattsStream.Data)))
+	sb.WriteString(fmt.Sprintf("cadence=%d ", len(b.CadenceStream.Data)))
+	sb.WriteString(fmt.Sprintf("grade=%d ", len(b.GradeStream.Data)))
+	sb.WriteString(fmt.Sprintf("moving=%d ", len(b.MovingStream.Data)))
+	sb.WriteString(fmt.Sprintf("temp=%d\n", len(b.TemperatureStream.Data)))
+	return sb.String()
 }
 
 func (b *BikeActivity) ToString() string {
 	sb := strings.Builder{}
 	sb.WriteString(b.Summary.ToString() + "\n")
 	sb.WriteString(fmt.Sprintf("\tMap: %s\n", b.Map.Polyline))
-	sb.WriteString("\tStreams stats:\n")
-	sb.WriteString(fmt.Sprintf("\t\tTime: %d\n", len(b.TimeStream.Data)))
-	sb.WriteString(fmt.Sprintf("\t\tLatLng: %d\n", len(b.LatLngStream.Data)))
-	sb.WriteString(fmt.Sprintf("\t\tAltitude: %d\n", len(b.AltitudeStream.Data)))
-	sb.WriteString(fmt.Sprintf("\t\tHeartrate: %d\n", len(b.HeartrateStream.Data)))
-	sb.WriteString(fmt.Sprintf("\t\tSpeed: %d\n", len(b.SpeedStream.Data)))
-	sb.WriteString(fmt.Sprintf("\t\tWatts: %d\n", len(b.WattsStream.Data)))
-	sb.WriteString(fmt.Sprintf("\t\tCadence: %d\n", len(b.CadenceStream.Data)))
-	sb.WriteString(fmt.Sprintf("\t\tGrade: %d\n", len(b.GradeStream.Data)))
-	sb.WriteString(fmt.Sprintf("\t\tMoving: %d\n", len(b.MovingStream.Data)))
+	sb.WriteString("\tStreams stats:\n\t")
+	sb.WriteString(b.StreamsSummary())
 	return sb.String()
 }

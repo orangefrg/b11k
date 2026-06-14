@@ -23,6 +23,8 @@ go.work.sum
 .idea/
 .vscode/
 *.swp
+*.xcuserstate
+xcuserdata/
 
 # Environment files
 .env

@@ -27,6 +27,10 @@ func CreateTables(ctx context.Context, conn *pgx.Conn) error {
 		return fmt.Errorf("failed to create favorite segments table: %w", err)
 	}
 
+	if err := createMobileAppSessionsTable(ctx, conn); err != nil {
+		return fmt.Errorf("failed to create mobile app sessions table: %w", err)
+	}
+
 	if err := createSegmentActivityMatchesTable(ctx, conn); err != nil {
 		return fmt.Errorf("failed to create segment activity matches table: %w", err)
 	}
@@ -54,6 +58,7 @@ func TruncateTables(ctx context.Context, conn *pgx.Conn) error {
 		"activity_geometries",
 		"activity_summaries",
 		"favorite_segments",
+		"mobile_app_sessions",
 	}
 
 	for _, table := range tables {
@@ -77,7 +82,8 @@ func DropAndRecreateTables(ctx context.Context, conn *pgx.Conn) error {
 		"point_samples",       // Depends on activity_summaries
 		"activity_geometries", // Depends on activity_summaries
 		"favorite_segments",   // Independent but referenced by segment_activity_matches
-		"activity_summaries",  // Base table
+		"mobile_app_sessions",
+		"activity_summaries", // Base table
 	}
 
 	log.Printf("🗑️ Dropping %d tables...", len(tables))
@@ -200,6 +206,40 @@ func createActivityGeometriesTable(ctx context.Context, conn *pgx.Conn) error {
 	return nil
 }
 
+func createMobileAppSessionsTable(ctx context.Context, conn *pgx.Conn) error {
+	query := `
+	CREATE TABLE IF NOT EXISTS mobile_app_sessions (
+		session_token TEXT PRIMARY KEY,
+		athlete_id BIGINT NOT NULL,
+		athlete_firstname TEXT,
+		athlete_lastname TEXT,
+		athlete_profile TEXT,
+		strava_access_token TEXT NOT NULL,
+		strava_refresh_token TEXT NOT NULL,
+		strava_expires_at TIMESTAMPTZ NOT NULL,
+		session_expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '90 days'),
+		created_at TIMESTAMPTZ DEFAULT NOW(),
+		updated_at TIMESTAMPTZ DEFAULT NOW(),
+		last_seen_at TIMESTAMPTZ DEFAULT NOW()
+	)`
+	if _, err := conn.Exec(ctx, query); err != nil {
+		return err
+	}
+
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_mobile_app_sessions_athlete_id ON mobile_app_sessions (athlete_id)",
+		"CREATE INDEX IF NOT EXISTS idx_mobile_app_sessions_last_seen_at ON mobile_app_sessions (last_seen_at)",
+		"CREATE INDEX IF NOT EXISTS idx_mobile_app_sessions_session_expires_at ON mobile_app_sessions (session_expires_at)",
+	}
+	for _, indexQuery := range indexes {
+		if _, err := conn.Exec(ctx, indexQuery); err != nil {
+			return fmt.Errorf("failed to create mobile_app_sessions index: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func createPointSamplesTable(ctx context.Context, conn *pgx.Conn) error {
 	query := `
 	CREATE TABLE IF NOT EXISTS point_samples (
@@ -216,6 +256,7 @@ func createPointSamplesTable(ctx context.Context, conn *pgx.Conn) error {
 		cadence INTEGER,
 		grade DOUBLE PRECISION,
 		moving BOOLEAN,
+		temperature INTEGER,
 		cumulative_distance DOUBLE PRECISION,
 		created_at TIMESTAMPTZ DEFAULT NOW()
 	)`
@@ -937,6 +978,9 @@ func ValidateAndMigrateSchema(ctx context.Context, conn *pgx.Conn, forceRebuild 
 	if err := ensureActivitySummaryColumns(ctx, conn); err != nil {
 		return err
 	}
+	if err := ensureMobileAppSessionColumns(ctx, conn); err != nil {
+		return err
+	}
 
 	expectedSchemas := GetExpectedTableSchemas()
 	var results []TableValidationResult
@@ -1036,27 +1080,72 @@ func ensureActivitySummaryColumns(ctx context.Context, conn *pgx.Conn) error {
 	return nil
 }
 
-// migratePointSamplesTable adds the cumulative_distance column to point_samples if it doesn't exist
-func migratePointSamplesTable(ctx context.Context, conn *pgx.Conn) error {
-	// Check if column exists
-	checkQuery := `
-	SELECT COUNT(*) FROM information_schema.columns 
-	WHERE table_name = 'point_samples' AND column_name = 'cumulative_distance'
-	`
-	var count int
-	err := conn.QueryRow(ctx, checkQuery).Scan(&count)
+func ensureMobileAppSessionColumns(ctx context.Context, conn *pgx.Conn) error {
+	exists, err := tableExists(ctx, conn, "mobile_app_sessions")
 	if err != nil {
-		return fmt.Errorf("failed to check for cumulative_distance column: %w", err)
+		return fmt.Errorf("failed to check mobile_app_sessions table: %w", err)
+	}
+	if !exists {
+		return createMobileAppSessionsTable(ctx, conn)
 	}
 
-	if count == 0 {
-		log.Printf("📝 Adding cumulative_distance column to point_samples table...")
-		alterQuery := `ALTER TABLE point_samples ADD COLUMN cumulative_distance DOUBLE PRECISION`
-		_, err := conn.Exec(ctx, alterQuery)
-		if err != nil {
-			return fmt.Errorf("failed to add cumulative_distance column: %w", err)
+	queries := []string{
+		"ALTER TABLE IF EXISTS mobile_app_sessions ADD COLUMN IF NOT EXISTS session_expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '90 days')",
+		"CREATE INDEX IF NOT EXISTS idx_mobile_app_sessions_session_expires_at ON mobile_app_sessions (session_expires_at)",
+	}
+	for _, query := range queries {
+		if _, err := conn.Exec(ctx, query); err != nil {
+			return fmt.Errorf("failed to ensure mobile_app_sessions compatibility columns: %w", err)
 		}
-		log.Printf("✅ Added cumulative_distance column to point_samples table")
+	}
+	return nil
+}
+
+func tableExists(ctx context.Context, conn *pgx.Conn, tableName string) (bool, error) {
+	var exists bool
+	query := `
+		SELECT EXISTS (
+			SELECT FROM information_schema.tables
+			WHERE table_schema = 'public'
+			AND table_name = $1
+		)
+	`
+	if err := conn.QueryRow(ctx, query, tableName).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+// migratePointSamplesTable adds optional stream columns to point_samples if they don't exist.
+func migratePointSamplesTable(ctx context.Context, conn *pgx.Conn) error {
+	columns := []struct {
+		name       string
+		definition string
+	}{
+		{name: "cumulative_distance", definition: "DOUBLE PRECISION"},
+		{name: "temperature", definition: "INTEGER"},
+	}
+
+	for _, column := range columns {
+		checkQuery := `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_name = 'point_samples' AND column_name = $1
+		`
+		var count int
+		err := conn.QueryRow(ctx, checkQuery, column.name).Scan(&count)
+		if err != nil {
+			return fmt.Errorf("failed to check for %s column: %w", column.name, err)
+		}
+
+		if count == 0 {
+			log.Printf("📝 Adding %s column to point_samples table...", column.name)
+			alterQuery := fmt.Sprintf(`ALTER TABLE point_samples ADD COLUMN %s %s`, column.name, column.definition)
+			_, err := conn.Exec(ctx, alterQuery)
+			if err != nil {
+				return fmt.Errorf("failed to add %s column: %w", column.name, err)
+			}
+			log.Printf("✅ Added %s column to point_samples table", column.name)
+		}
 	}
 
 	return nil
@@ -1325,6 +1414,7 @@ func GetExpectedTableSchemas() []TableSchema {
 				{Name: "cadence", Type: "integer", Nullable: true},
 				{Name: "grade", Type: "double precision", Nullable: true},
 				{Name: "moving", Type: "boolean", Nullable: true},
+				{Name: "temperature", Type: "integer", Nullable: true},
 				{Name: "cumulative_distance", Type: "double precision", Nullable: true},
 				{Name: "created_at", Type: "timestamp with time zone", Nullable: true},
 			},
@@ -1362,6 +1452,29 @@ func GetExpectedTableSchemas() []TableSchema {
 				"idx_favorite_segments_segment_geog_simplified",
 				"idx_favorite_segments_athlete_name",
 				"idx_favorite_segments_created_at",
+			},
+		},
+		{
+			Name:    "mobile_app_sessions",
+			IsCache: false,
+			Columns: []ColumnDef{
+				{Name: "session_token", Type: "text", Nullable: false},
+				{Name: "athlete_id", Type: "bigint", Nullable: false},
+				{Name: "athlete_firstname", Type: "text", Nullable: true},
+				{Name: "athlete_lastname", Type: "text", Nullable: true},
+				{Name: "athlete_profile", Type: "text", Nullable: true},
+				{Name: "strava_access_token", Type: "text", Nullable: false},
+				{Name: "strava_refresh_token", Type: "text", Nullable: false},
+				{Name: "strava_expires_at", Type: "timestamp with time zone", Nullable: false},
+				{Name: "session_expires_at", Type: "timestamp with time zone", Nullable: false},
+				{Name: "created_at", Type: "timestamp with time zone", Nullable: true},
+				{Name: "updated_at", Type: "timestamp with time zone", Nullable: true},
+				{Name: "last_seen_at", Type: "timestamp with time zone", Nullable: true},
+			},
+			Indexes: []string{
+				"idx_mobile_app_sessions_athlete_id",
+				"idx_mobile_app_sessions_last_seen_at",
+				"idx_mobile_app_sessions_session_expires_at",
 			},
 		},
 		{
@@ -1449,6 +1562,8 @@ func createTableBySchema(ctx context.Context, conn *pgx.Conn, schema TableSchema
 		return createPointSamplesTable(ctx, conn)
 	case "favorite_segments":
 		return createFavoriteSegmentsTable(ctx, conn)
+	case "mobile_app_sessions":
+		return createMobileAppSessionsTable(ctx, conn)
 	case "segment_activity_matches":
 		return createSegmentActivityMatchesTable(ctx, conn)
 	case "discovered_activity_buffers":

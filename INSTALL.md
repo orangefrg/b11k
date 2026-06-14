@@ -2,7 +2,7 @@
 
 This guide will walk you through installing and setting up b11k on your system.
 
-Copyright (c) 2025 github.com/orangefrg
+Copyright (c) 2025 B11K contributors
 
 ## Prerequisites
 
@@ -272,7 +272,7 @@ Secrets can be provided through environment variables instead of `config.yaml`. 
 
 Example for Cloudflare Tunnel:
 ```yaml
-web_host: priv.o-range.company
+web_host: b11k.example.com
 web_port: 8080  # Application listens on port 8080 (non-privileged)
 web_protocol: https  # Redirect URIs use https:// to match browser
 ```

@@ -163,8 +163,8 @@ func InsertPointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.Bi
 	query := `
 	INSERT INTO point_samples (
 		activity_id, athlete_id, point_index, time, location, altitude, heartrate,
-		speed, watts, cadence, grade, moving, cumulative_distance
-	) VALUES ($1, $2, $3, $4, ST_GeogFromText($5), $6, $7, $8, $9, $10, $11, $12, $13)
+		speed, watts, cadence, grade, moving, temperature, cumulative_distance
+	) VALUES ($1, $2, $3, $4, ST_GeogFromText($5), $6, $7, $8, $9, $10, $11, $12, $13, $14)
 	`
 
 	stmt, err := tx.Prepare(ctx, "insert_point_samples", query)
@@ -186,6 +186,7 @@ func InsertPointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.Bi
 		var cadence *int
 		var grade *float64
 		var moving *bool
+		var temperature *int
 
 		if i < len(activity.LatLngStream.Data) && len(activity.LatLngStream.Data[i]) >= 2 {
 			lat := activity.LatLngStream.Data[i][0]
@@ -224,10 +225,17 @@ func InsertPointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.Bi
 		if i < len(activity.MovingStream.Data) {
 			moving = &activity.MovingStream.Data[i]
 		}
+		if i < len(activity.TemperatureStream.Data) {
+			temperature = &activity.TemperatureStream.Data[i]
+		}
+		sampleCumulativeDistance := cumulativeDistance
+		if i < len(activity.DistanceStream.Data) {
+			sampleCumulativeDistance = activity.DistanceStream.Data[i]
+		}
 
 		_, err := tx.Exec(ctx, stmt.SQL,
 			activity.Summary.ID, activity.Summary.AthleteID, i, activity.TimeStream.Data[i], locationWKT,
-			altitude, heartrate, speed, watts, cadence, grade, moving, cumulativeDistance,
+			altitude, heartrate, speed, watts, cadence, grade, moving, temperature, sampleCumulativeDistance,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert point sample %d: %w", i, err)
@@ -438,8 +446,8 @@ func ReplacePointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.B
 	insertQuery := `
 	INSERT INTO point_samples (
 		activity_id, athlete_id, point_index, time, location, altitude, heartrate,
-		speed, watts, cadence, grade, moving, cumulative_distance
-	) VALUES ($1, $2, $3, $4, ST_GeogFromText($5), $6, $7, $8, $9, $10, $11, $12, $13)
+		speed, watts, cadence, grade, moving, temperature, cumulative_distance
+	) VALUES ($1, $2, $3, $4, ST_GeogFromText($5), $6, $7, $8, $9, $10, $11, $12, $13, $14)
 	`
 
 	stmt, err := tx.Prepare(ctx, "replace_point_samples", insertQuery)
@@ -462,6 +470,7 @@ func ReplacePointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.B
 		var cadence *int
 		var grade *float64
 		var moving *bool
+		var temperature *int
 
 		// Get location data
 		if i < len(activity.LatLngStream.Data) && len(activity.LatLngStream.Data[i]) >= 2 {
@@ -502,10 +511,17 @@ func ReplacePointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.B
 		if i < len(activity.MovingStream.Data) {
 			moving = &activity.MovingStream.Data[i]
 		}
+		if i < len(activity.TemperatureStream.Data) {
+			temperature = &activity.TemperatureStream.Data[i]
+		}
+		sampleCumulativeDistance := cumulativeDistance
+		if i < len(activity.DistanceStream.Data) {
+			sampleCumulativeDistance = activity.DistanceStream.Data[i]
+		}
 
 		_, err := tx.Exec(ctx, stmt.SQL,
 			activity.Summary.ID, activity.Summary.AthleteID, i, activity.TimeStream.Data[i], locationWKT,
-			altitude, heartrate, speed, watts, cadence, grade, moving, cumulativeDistance,
+			altitude, heartrate, speed, watts, cadence, grade, moving, temperature, sampleCumulativeDistance,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert point sample %d: %w", i, err)

@@ -2,7 +2,7 @@
 
 A web application for tracking and visualizing Strava bike activities. The application syncs activities from Strava, stores them in a PostgreSQL database with PostGIS support, and provides a web interface for viewing activities, segments, maps, and analytics.
 
-Copyright (c) 2025 github.com/orangefrg
+Copyright (c) 2025 B11K contributors
 
 ## Features
 

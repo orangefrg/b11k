@@ -1,4 +1,4 @@
-// Copyright (c) 2025 github.com/orangefrg
+// Copyright (c) 2025 B11K contributors
 // Licensed under the Apache License, Version 2.0
 
 package main
@@ -25,14 +25,18 @@ type Config struct {
 	StravaClientID                 string  `yaml:"strava_client_id"`
 	StravaClientSecret             string  `yaml:"strava_client_secret"`
 	StravaRedirectURI              string  `yaml:"strava_redirect_uri"`
+	IOSRedirectURI                 string  `yaml:"ios_redirect_uri"`
 	PGIP                           string  `yaml:"pg_ip"`
 	PGPort                         string  `yaml:"pg_port"`
 	PGUser                         string  `yaml:"pg_user"`
 	PGPassword                     string  `yaml:"pg_secret"`
 	PGDatabase                     string  `yaml:"pg_db"`
 	WebHost                        string  `yaml:"web_host"`
+	PublicAPIHost                  string  `yaml:"public_api_host"`
 	WebPort                        string  `yaml:"web_port"`
 	WebProtocol                    string  `yaml:"web_protocol"` // "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy
+	TokenEncryptionKey             string  `yaml:"token_encryption_key"`
+	EnableDevAPI                   bool    `yaml:"enable_dev_api"`
 	DevReloadTemplates             bool    `yaml:"dev_reload_templates"`
 	MobileActivityOrder            string  `yaml:"mobile_activity_order"`
 	DiscoveredMapEnabled           *bool   `yaml:"discovered_map_enabled"`
@@ -144,14 +148,18 @@ func main() {
 		StravaClientID:                 config.StravaClientID,
 		StravaClientSecret:             config.StravaClientSecret,
 		StravaRedirectURI:              config.StravaRedirectURI,
+		IOSRedirectURI:                 config.IOSRedirectURI,
 		PGIP:                           config.PGIP,
 		PGPort:                         config.PGPort,
 		PGUser:                         config.PGUser,
 		PGPassword:                     config.PGPassword,
 		PGDatabase:                     config.PGDatabase,
 		WebHost:                        config.WebHost,
+		PublicAPIHost:                  config.PublicAPIHost,
 		WebPort:                        config.WebPort,
 		WebProtocol:                    config.WebProtocol,
+		TokenEncryptionKey:             config.TokenEncryptionKey,
+		EnableDevAPI:                   config.EnableDevAPI,
 		DevReloadTemplates:             config.DevReloadTemplates,
 		MobileActivityOrder:            config.MobileActivityOrder,
 		DiscoveredMapEnabled:           *config.DiscoveredMapEnabled,
@@ -246,15 +254,19 @@ func applyEnvOverrides(config *Config) {
 	envString(&config.StravaClientID, "B11K_STRAVA_CLIENT_ID")
 	envString(&config.StravaClientSecret, "B11K_STRAVA_CLIENT_SECRET")
 	envString(&config.StravaRedirectURI, "B11K_STRAVA_REDIRECT_URI")
+	envString(&config.IOSRedirectURI, "B11K_IOS_REDIRECT_URI")
 	envString(&config.PGIP, "B11K_PG_HOST", "B11K_PG_IP")
 	envString(&config.PGPort, "B11K_PG_PORT")
 	envString(&config.PGUser, "B11K_PG_USER")
 	envString(&config.PGPassword, "B11K_PG_PASSWORD", "B11K_PG_SECRET")
 	envString(&config.PGDatabase, "B11K_PG_DATABASE", "B11K_PG_DB")
 	envString(&config.WebHost, "B11K_WEB_HOST")
+	envString(&config.PublicAPIHost, "B11K_PUBLIC_API_HOST")
 	envString(&config.WebPort, "B11K_WEB_PORT")
 	envString(&config.WebProtocol, "B11K_WEB_PROTOCOL")
+	envString(&config.TokenEncryptionKey, "B11K_TOKEN_ENCRYPTION_KEY")
 	envString(&config.MobileActivityOrder, "B11K_MOBILE_ACTIVITY_ORDER")
+	envBool(&config.EnableDevAPI, "B11K_ENABLE_DEV_API")
 	envBool(&config.DevReloadTemplates, "B11K_DEV_RELOAD_TEMPLATES")
 	envBoolPtr(&config.DiscoveredMapEnabled, "B11K_DISCOVERED_MAP_ENABLED")
 	envFloat(&config.DiscoveredRevealRadiusMeters, "B11K_DISCOVERED_REVEAL_RADIUS_METERS")
@@ -335,6 +347,24 @@ func normalizeConfig(config *Config) {
 	}
 	if config.DiscoveredSampleDistanceMeters <= 0 {
 		config.DiscoveredSampleDistanceMeters = 50
+	}
+	if config.IOSRedirectURI == "" {
+		host := config.PublicAPIHost
+		if host == "" {
+			host = config.WebHost
+		}
+		if host == "" {
+			host = "localhost"
+		}
+		protocol := "http"
+		if config.WebProtocol == "https" {
+			protocol = "https"
+		}
+		if protocol == "https" || config.WebPort == "" || config.WebPort == "80" {
+			config.IOSRedirectURI = fmt.Sprintf("%s://%s/api/mobile/auth/callback", protocol, host)
+		} else {
+			config.IOSRedirectURI = fmt.Sprintf("%s://%s:%s/api/mobile/auth/callback", protocol, host, config.WebPort)
+		}
 	}
 }
 

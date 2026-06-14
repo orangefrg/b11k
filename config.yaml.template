@@ -1,14 +1,18 @@
 strava_client_id: ""  # Prefer B11K_STRAVA_CLIENT_ID in .env
 strava_client_secret: ""  # Prefer B11K_STRAVA_CLIENT_SECRET in .env
 # strava_redirect_uri: http://localhost:8080/strava/callback  # Optional: auto-constructed from web_protocol, web_host and web_port if not provided
+ios_redirect_uri: ""  # Optional; for iPhone LAN testing use http://<your-lan-ip>:8080/api/mobile/auth/callback
 pg_ip: localhost
 pg_port: 5432
 pg_db: b11k_db
 pg_user: b11k
 pg_secret: ""  # Prefer B11K_PG_PASSWORD in .env
 web_host: localhost  # Hostname or IP address (default: localhost)
+public_api_host: ""  # Production API hostname, e.g. api.b11k.example.com; leave empty for LAN/local testing
 web_port: 8080  # Port to listen on (use non-privileged port 1024+, not 80/443)
 web_protocol: http  # "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy (only affects redirect URI, not listening port)
+token_encryption_key: ""  # Prefer B11K_TOKEN_ENCRYPTION_KEY; generate with: openssl rand -base64 32
+enable_dev_api: false  # Enables destructive local/private-LAN test endpoints such as /api/mobile/dev/rebuild-sync
 dev_reload_templates: false  # Set B11K_DEV_RELOAD_TEMPLATES=true for local live-testing
 mobile_activity_order: stats_first  # "stats_first" or "map_first" on narrow screens
 discovered_map_enabled: true  # Set false to disable the Discovered page, APIs, and sync rebuilds
