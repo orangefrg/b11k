@@ -11,6 +11,7 @@
       center: [0,0],
       zoom: 2
     });
+    installMissingStyleImageFallback(map);
     fetch('/api/activities/' + id + '/points').then(r=>r.json()).then(points => {
       if (!Array.isArray(points) || points.length===0) return;
       const lineCoords = points.map(p => [p.lng, p.lat]);
@@ -22,36 +23,32 @@
       const fc = { type: 'FeatureCollection', features };
 
       map.on('load', async () => {
-        // Create line segments for gradient coloring
-        const lineSegments = [];
-        for (let i = 0; i < lineCoords.length - 1; i++) {
-          lineSegments.push({
-            type: 'Feature',
-            geometry: {
-              type: 'LineString',
-              coordinates: [lineCoords[i], lineCoords[i + 1]]
-            },
-            properties: {
-              idx: i,
-              // Store metric values at both endpoints for gradient (average of start and end)
-              speed: ((features[i].properties?.speed || 0) + (features[i + 1]?.properties?.speed || 0)) / 2,
-              heartrate: ((features[i].properties?.heartrate || 0) + (features[i + 1]?.properties?.heartrate || 0)) / 2,
-              cadence: ((features[i].properties?.cadence || 0) + (features[i + 1]?.properties?.cadence || 0)) / 2,
-              alt: ((features[i].properties?.alt || 0) + (features[i + 1]?.properties?.alt || 0)) / 2,
-              grade: ((features[i].properties?.grade || 0) + (features[i + 1]?.properties?.grade || 0)) / 2,
-              moving: features[i].properties?.moving || false
-            }
-          });
-        }
-        
+        const routeFeature = {
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: lineCoords }
+        };
+
         try {
-          map.addSource('route', { type: 'geojson', data: { type: 'FeatureCollection', features: lineSegments } });
+          map.addSource('route-plain', { type: 'geojson', data: routeFeature });
+          map.addLayer({
+            id: 'route-plain-line',
+            type: 'line',
+            source: 'route-plain',
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: { 'line-color': '#7cc8ff', 'line-width': 5, 'line-opacity': 0.95 }
+          });
+          map.addSource('route', { type: 'geojson', lineMetrics: true, data: routeFeature });
           map.addLayer({
             id: 'route-line',
             type: 'line',
             source: 'route',
             layout: { 'line-cap': 'round', 'line-join': 'round' },
-            paint: { 'line-color': '#7cc8ff', 'line-width': 5, 'line-opacity': 0.95 }
+            paint: {
+              'line-color': '#7cc8ff',
+              'line-gradient': solidLineGradient('#7cc8ff'),
+              'line-width': 5,
+              'line-opacity': 0
+            }
           });
         } catch (e) {
           console.warn('Error adding route source/layer:', e);
@@ -80,7 +77,7 @@
           map.addLayer({
             id: 'route-arrows',
             type: 'symbol',
-            source: 'route',
+            source: 'route-plain',
             layout: {
               'symbol-placement': 'line',
               'symbol-spacing': 150,
@@ -192,6 +189,28 @@
         const select = document.getElementById('color-metric');
         const legend = document.getElementById('legend');
         if (select) {
+          const showPlainRoute = () => {
+            if (map.getLayer('route-plain-line')) {
+              map.setPaintProperty('route-plain-line', 'line-color', '#7cc8ff');
+              map.setPaintProperty('route-plain-line', 'line-opacity', 0.95);
+              map.setPaintProperty('route-plain-line', 'line-width', 5);
+            }
+            if (map.getLayer('route-line')) {
+              map.setPaintProperty('route-line', 'line-color', '#7cc8ff');
+              map.setPaintProperty('route-line', 'line-gradient', solidLineGradient('#7cc8ff'));
+              map.setPaintProperty('route-line', 'line-opacity', 0.95);
+              map.setPaintProperty('route-line', 'line-width', 5);
+            }
+          };
+          const showMetricRoute = () => {
+            if (map.getLayer('route-plain-line')) {
+              map.setPaintProperty('route-plain-line', 'line-opacity', 0);
+            }
+            if (map.getLayer('route-line')) {
+              map.setPaintProperty('route-line', 'line-opacity', 0.95);
+              map.setPaintProperty('route-line', 'line-width', 5);
+            }
+          };
           const applyColor = async () => {
             const metric = select.value;
             try {
@@ -201,12 +220,11 @@
                 map.setPaintProperty('route-points-layer', 'circle-opacity', opacity);
                 map.setPaintProperty('route-points-layer', 'circle-color', '#f72585');
                 map.setPaintProperty('route-points-layer', 'circle-radius', 3);
-                map.setPaintProperty('route-line', 'line-color', '#7cc8ff');
-                map.setPaintProperty('route-line', 'line-opacity', 0.95);
-                map.setPaintProperty('route-line', 'line-width', 5);
+                showPlainRoute();
                 if (legend) legend.style.display = 'none';
                 return;
               }
+              showMetricRoute();
               if (metric === 'moving') {
                 map.setPaintProperty('route-points-layer', 'circle-opacity', [
                   'case',
@@ -215,12 +233,7 @@
                   0
                 ]);
                 map.setPaintProperty('route-points-layer', 'circle-color', '#e74c3c');
-                map.setPaintProperty('route-line', 'line-color', [
-                  'case',
-                  ['==', ['get', 'moving'], false],
-                  '#e74c3c',
-                  '#4cc9f0'
-                ]);
+                map.setPaintProperty('route-line', 'line-gradient', movingLineGradient(features));
                 if (legend) legend.style.display = 'none';
               } else if (metric === 'hrzones') {
               try {
@@ -234,14 +247,14 @@
                   const {min, max} = computeRange(features, 'heartrate');
                   map.setPaintProperty('route-points-layer', 'circle-opacity', 1);
                   map.setPaintProperty('route-points-layer', 'circle-color', gradientExpression('heartrate', min, max));
-                  map.setPaintProperty('route-line', 'line-color', gradientExpression('heartrate', min, max));
+                  map.setPaintProperty('route-line', 'line-gradient', lineProgressGradientExpression(features, 'heartrate', min, max));
                   if (legend) renderGradientLegendVertical(legend, 'HR', min, max);
                   return;
                 }
                 const zoneSteps = hrZonesExpression({heart_rate:{zones:zonesArr}}, colors);
                 map.setPaintProperty('route-points-layer', 'circle-opacity', 1);
                 map.setPaintProperty('route-points-layer', 'circle-color', zoneSteps);
-                map.setPaintProperty('route-line', 'line-color', zoneSteps);
+                map.setPaintProperty('route-line', 'line-gradient', hrZonesLineGradient(features, zonesArr, colors));
                 if (legend) renderZonesLegendVertical(legend, colors, zonesArr);
               } catch (e) {
                 console.error('HR zones error', e);
@@ -251,7 +264,7 @@
                 const {min, max} = computeRange(features, metric);
                 const gradExpr = gradientExpression(metric, min, max);
                 map.setPaintProperty('route-points-layer', 'circle-color', gradExpr);
-                map.setPaintProperty('route-line', 'line-color', gradExpr);
+                map.setPaintProperty('route-line', 'line-gradient', lineProgressGradientExpression(features, metric, min, max));
                 if (legend) renderGradientLegendVertical(legend, labelFor(metric), min, max);
               }
             } catch (e) {
@@ -993,6 +1006,20 @@
     });
   }
 
+  function installMissingStyleImageFallback(map) {
+    map.on('styleimagemissing', event => {
+      const id = event && event.id;
+      if (!id || map.hasImage(id)) return;
+      const size = Math.max(8, Math.min(64, Number((id.match(/-(\d+)$/) || [])[1]) || 16));
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, size, size);
+      map.addImage(id, ctx.getImageData(0, 0, size, size));
+    });
+  }
+
   function renderGradientLegendVertical(el, label, min, max) {
     const mid = (min + max) / 2;
     el.classList.add('vertical');
@@ -1189,6 +1216,119 @@
       expr.push(stop, colors[i]);
     }
     return expr;
+  }
+
+  function solidLineGradient(color) {
+    return ['interpolate', ['linear'], ['line-progress'], 0, color, 1, color];
+  }
+
+  function lineProgressGradientExpression(features, metric, min, max) {
+    const expr = ['interpolate', ['linear'], ['line-progress']];
+    for (const idx of sampledFeatureIndices(features)) {
+      const progress = featureProgress(idx, features.length);
+      const value = Number(features[idx]?.properties?.[metric]);
+      expr.push(progress, metricColor(Number.isFinite(value) ? value : min, min, max));
+    }
+    ensureLineGradientEndpoints(expr, features, idx => {
+      const value = Number(features[idx]?.properties?.[metric]);
+      return metricColor(Number.isFinite(value) ? value : min, min, max);
+    });
+    return expr;
+  }
+
+  function movingLineGradient(features) {
+    const expr = ['step', ['line-progress'], movingColor(features[0]?.properties?.moving)];
+    for (const idx of sampledFeatureIndices(features).slice(1)) {
+      expr.push(featureProgress(idx, features.length), movingColor(features[idx]?.properties?.moving));
+    }
+    return expr;
+  }
+
+  function hrZonesLineGradient(features, zones, colors) {
+    const expr = ['step', ['line-progress'], hrZoneColor(features[0]?.properties?.heartrate, zones, colors)];
+    for (const idx of sampledFeatureIndices(features).slice(1)) {
+      expr.push(featureProgress(idx, features.length), hrZoneColor(features[idx]?.properties?.heartrate, zones, colors));
+    }
+    return expr;
+  }
+
+  function sampledFeatureIndices(features, maxStops = 256) {
+    const count = Array.isArray(features) ? features.length : 0;
+    if (count === 0) return [0];
+    if (count <= maxStops) return Array.from({ length: count }, (_, i) => i);
+    const step = (count - 1) / (maxStops - 1);
+    const indices = [];
+    let last = -1;
+    for (let i = 0; i < maxStops; i++) {
+      const idx = Math.min(count - 1, Math.round(i * step));
+      if (idx !== last) {
+        indices.push(idx);
+        last = idx;
+      }
+    }
+    if (indices[indices.length - 1] !== count - 1) indices.push(count - 1);
+    return indices;
+  }
+
+  function featureProgress(index, count) {
+    if (count <= 1) return 0;
+    return Math.max(0, Math.min(1, index / (count - 1)));
+  }
+
+  function ensureLineGradientEndpoints(expr, features, colorForIndex) {
+    const count = Array.isArray(features) ? features.length : 0;
+    if (count === 0) {
+      expr.push(0, '#7cc8ff', 1, '#7cc8ff');
+      return;
+    }
+    if (expr.length === 3) {
+      expr.push(0, colorForIndex(0), 1, colorForIndex(count - 1));
+      return;
+    }
+    const firstStop = expr[3];
+    if (firstStop !== 0) expr.splice(3, 0, 0, colorForIndex(0));
+    const lastStop = expr[expr.length - 2];
+    if (lastStop !== 1) expr.push(1, colorForIndex(count - 1));
+  }
+
+  function metricColor(value, min, max) {
+    if (!Number.isFinite(value)) return '#7cc8ff';
+    if (!Number.isFinite(min)) min = value;
+    if (!Number.isFinite(max) || max <= min) max = min + 1;
+    const t = Math.max(0, Math.min(1, (value - min) / (max - min)));
+    if (t <= 0.5) return mixHex('#2ecc71', '#f1c40f', t / 0.5);
+    return mixHex('#f1c40f', '#e74c3c', (t - 0.5) / 0.5);
+  }
+
+  function movingColor(moving) {
+    return moving === false || moving === 'false' ? '#e74c3c' : '#4cc9f0';
+  }
+
+  function hrZoneColor(value, zones, colors) {
+    const hr = Number(value);
+    if (!Number.isFinite(hr)) return colors[0] || '#7cc8ff';
+    const count = Math.min(Array.isArray(zones) ? zones.length : 0, colors.length);
+    for (let i = count - 1; i >= 0; i--) {
+      const min = Number(zones[i]?.min);
+      if (Number.isFinite(min) && hr >= min) return colors[i];
+    }
+    return colors[0] || '#7cc8ff';
+  }
+
+  function mixHex(a, b, t) {
+    const ca = hexToRgb(a);
+    const cb = hexToRgb(b);
+    const mix = channel => Math.round(ca[channel] + (cb[channel] - ca[channel]) * t);
+    return `rgb(${mix('r')}, ${mix('g')}, ${mix('b')})`;
+  }
+
+  function hexToRgb(hex) {
+    const value = hex.replace('#', '');
+    return {
+      r: parseInt(value.slice(0, 2), 16),
+      g: parseInt(value.slice(2, 4), 16),
+      b: parseInt(value.slice(4, 6), 16)
+    };
   }
 
   function computeRange(features, metric) {
@@ -1519,6 +1659,7 @@
       center: [0, 0],
       zoom: 2
     });
+    installMissingStyleImageFallback(map);
 
     // Load segment geometry and display on map
     fetch(`/api/segments/${segmentID}`).then(r => r.json()).then(segment => {
@@ -2933,6 +3074,7 @@
       center: [0, 0],
       zoom: 2
     });
+    installMissingStyleImageFallback(map);
 
     let hasFitCoverage = false;
     let fogRequestID = 0;

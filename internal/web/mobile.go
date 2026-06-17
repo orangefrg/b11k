@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,6 +19,11 @@ import (
 	"b11k/internal/sync"
 
 	"github.com/jackc/pgx/v5"
+)
+
+const (
+	mobileAuthDeniedMessage = "Strava authorization was not completed."
+	mobileAuthFailedMessage = "Strava login could not be completed. Return to B11K and try again."
 )
 
 func (s *server) handleMobileAuthStart(w http.ResponseWriter, r *http.Request) {
@@ -76,12 +82,14 @@ func (s *server) handleMobileAuthExchange(w http.ResponseWriter, r *http.Request
 	authCfg := strava.NewStravaAuthConfig(s.cfg.StravaClientID, s.cfg.StravaClientSecret, s.cfg.IOSRedirectURI)
 	tokenResp, err := strava.ExchangeCodeForTokenResponse(*authCfg, req.Code)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("token exchange failed: %v", err), http.StatusBadGateway)
+		log.Printf("mobile token exchange failed: %v", err)
+		http.Error(w, mobileAuthFailedMessage, http.StatusBadGateway)
 		return
 	}
 	athlete, err := strava.FetchCurrentAthlete(tokenResp.AccessToken)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("athlete fetch failed: %v", err), http.StatusBadGateway)
+		log.Printf("mobile athlete fetch failed: %v", err)
+		http.Error(w, mobileAuthFailedMessage, http.StatusBadGateway)
 		return
 	}
 
@@ -111,11 +119,15 @@ func (s *server) handleMobileAuthCallback(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if accessError != "" {
+		if !s.consumeMobileAuthState(state) {
+			s.renderMobileAuthCallbackPage(w, "This login link expired.", "Return to B11K and start Strava login again.")
+			return
+		}
 		s.storeMobileAuthResult(state, mobileAuthResult{
-			Error:     accessError,
+			Error:     mobileAuthDeniedMessage,
 			ExpiresAt: time.Now().Add(10 * time.Minute),
 		})
-		s.renderMobileAuthCallbackPage(w, "Strava authorization was not completed.", accessError)
+		s.renderMobileAuthCallbackPage(w, mobileAuthDeniedMessage, "Return to B11K and start Strava login again.")
 		return
 	}
 	if code == "" {
@@ -134,22 +146,22 @@ func (s *server) handleMobileAuthCallback(w http.ResponseWriter, r *http.Request
 	authCfg := strava.NewStravaAuthConfig(s.cfg.StravaClientID, s.cfg.StravaClientSecret, s.cfg.IOSRedirectURI)
 	tokenResp, err := strava.ExchangeCodeForTokenResponse(*authCfg, code)
 	if err != nil {
-		msg := fmt.Sprintf("token exchange failed: %v", err)
+		log.Printf("mobile token exchange failed: %v", err)
 		s.storeMobileAuthResult(state, mobileAuthResult{
-			Error:     msg,
+			Error:     mobileAuthFailedMessage,
 			ExpiresAt: time.Now().Add(10 * time.Minute),
 		})
-		s.renderMobileAuthCallbackPage(w, "B11K could not finish Strava login.", msg)
+		s.renderMobileAuthCallbackPage(w, "B11K could not finish Strava login.", mobileAuthFailedMessage)
 		return
 	}
 	athlete, err := strava.FetchCurrentAthlete(tokenResp.AccessToken)
 	if err != nil {
-		msg := fmt.Sprintf("athlete fetch failed: %v", err)
+		log.Printf("mobile athlete fetch failed: %v", err)
 		s.storeMobileAuthResult(state, mobileAuthResult{
-			Error:     msg,
+			Error:     mobileAuthFailedMessage,
 			ExpiresAt: time.Now().Add(10 * time.Minute),
 		})
-		s.renderMobileAuthCallbackPage(w, "B11K could not load your Strava profile.", msg)
+		s.renderMobileAuthCallbackPage(w, "B11K could not load your Strava profile.", mobileAuthFailedMessage)
 		return
 	}
 
@@ -373,7 +385,7 @@ func (s *server) handleMobileActivityRoute(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *server) handleMobileDevRebuildSync(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.EnableDevAPI || !isLocalOrPrivateHost(requestHost(r)) {
+	if !s.cfg.EnableDevAPI || !isLocalOrPrivateRequest(r) {
 		http.NotFound(w, r)
 		return
 	}
@@ -991,6 +1003,10 @@ func (s *server) mobileSessionFromRequest(w http.ResponseWriter, r *http.Request
 	}
 
 	sessionToken := strings.TrimSpace(strings.TrimPrefix(auth, prefix))
+	if !isPlausibleMobileBearerToken(sessionToken) {
+		http.Error(w, "invalid session", http.StatusUnauthorized)
+		return mobileSession{}, false
+	}
 	s.mobileMu.Lock()
 	session, ok := s.mobileSessions[sessionToken]
 	s.mobileMu.Unlock()
@@ -1000,7 +1016,8 @@ func (s *server) mobileSessionFromRequest(w http.ResponseWriter, r *http.Request
 		session, err = s.loadMobileSession(sessionToken)
 		if err != nil {
 			if err != pgx.ErrNoRows {
-				http.Error(w, fmt.Sprintf("session lookup failed: %v", err), http.StatusInternalServerError)
+				log.Printf("⚠️ Mobile session lookup failed: %v", err)
+				http.Error(w, "session lookup failed", http.StatusInternalServerError)
 				return mobileSession{}, false
 			}
 			http.Error(w, "invalid session", http.StatusUnauthorized)
@@ -1010,7 +1027,8 @@ func (s *server) mobileSessionFromRequest(w http.ResponseWriter, r *http.Request
 
 	session, err := s.refreshMobileSessionIfNeeded(session)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("session refresh failed: %v", err), http.StatusUnauthorized)
+		log.Printf("⚠️ Mobile session refresh failed: %v", err)
+		http.Error(w, "invalid or expired session", http.StatusUnauthorized)
 		return mobileSession{}, false
 	}
 
@@ -1024,6 +1042,19 @@ func (s *server) mobileSessionFromRequest(w http.ResponseWriter, r *http.Request
 	s.mobileMu.Unlock()
 
 	return session, true
+}
+
+func isPlausibleMobileBearerToken(token string) bool {
+	if token == "" || len(token) > 128 {
+		return false
+	}
+	for _, r := range token {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func templateEscape(value string) string {

@@ -3,9 +3,11 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -156,10 +158,14 @@ func RunServer(ctx context.Context, cfg Config) {
 	mux.HandleFunc("/api/mobile/auth/callback", s.handleMobileAuthCallback)
 	mux.HandleFunc("/api/mobile/auth/session", s.handleMobileAuthSession)
 	mux.HandleFunc("/api/mobile/me", s.handleMobileMe)
+	mux.HandleFunc("/api/mobile/profile", s.handleMobileProfile)
+	mux.HandleFunc("/api/mobile/logout", s.handleMobileLogout)
 	mux.HandleFunc("/api/mobile/sync", s.handleMobileSync)
 	mux.HandleFunc("/api/mobile/dev/rebuild-sync", s.handleMobileDevRebuildSync)
 	mux.HandleFunc("/api/mobile/activities", s.handleMobileActivities)
 	mux.HandleFunc("/api/mobile/activities/", s.handleMobileActivities)
+	mux.HandleFunc("/api/mobile/segments", s.handleMobileSegments)
+	mux.HandleFunc("/api/mobile/segments/", s.handleMobileSegments)
 	mux.HandleFunc("/strava/sync", s.handleStravaSyncSSE)
 	mux.HandleFunc("/api/segments", s.handleSegmentsAPI)
 	mux.HandleFunc("/api/segments/", s.handleSegmentAPI)
@@ -167,15 +173,24 @@ func RunServer(ctx context.Context, cfg Config) {
 	mux.HandleFunc("/segment/", s.handleSegmentPage)
 	mux.HandleFunc("/profile", s.handleProfilePage)
 	if cfg.DiscoveredMapEnabled {
+		mux.HandleFunc("/api/mobile/discovered/", s.handleMobileDiscovered)
 		mux.HandleFunc("/discovered", s.handleDiscoveredPage)
 		mux.HandleFunc("/api/discovered/", s.handleDiscoveredAPI)
 	}
 
 	// static
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(filepath.FromSlash("web/static")))))
+	mux.Handle("/static/", http.StripPrefix("/static/", s.staticFileServer()))
 
 	addr := ":" + strings.TrimPrefix(cfg.WebPort, ":")
-	if err := http.ListenAndServe(addr, s.securityMiddleware(mux)); err != nil {
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           s.securityMiddleware(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      15 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
@@ -215,34 +230,54 @@ func (s *server) securityMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (s *server) staticFileServer() http.Handler {
+	files := http.FileServer(http.Dir(filepath.FromSlash("web/static")))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.DevReloadTemplates || isLocalOrPrivateRequest(r) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Pragma", "no-cache")
+		} else {
+			w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
+		}
+		files.ServeHTTP(w, r)
+	})
+}
+
 func (s *server) isRequestAllowed(r *http.Request) bool {
 	path := r.URL.Path
 	if path == "/api/mobile/auth/callback" {
 		return true
 	}
 	if strings.HasPrefix(path, "/api/mobile/dev/") {
-		return s.cfg.EnableDevAPI && isLocalOrPrivateHost(requestHost(r))
+		return s.cfg.EnableDevAPI && isLocalOrPrivateRequest(r)
 	}
 
 	apiHost := normalizeHost(s.cfg.PublicAPIHost)
-	if apiHost == "" {
+	webHost := normalizeHost(s.cfg.WebHost)
+	if apiHost == "" && webHost == "" {
 		return true
 	}
-	host := normalizeHost(requestHost(r))
-	if host == "" || isLocalOrPrivateHost(host) {
+	host := requestHost(r)
+	if host == "" {
 		return true
 	}
-	if host == apiHost {
+	if isLocalOrPrivateHost(host) {
+		return isLocalOrPrivateRequest(r)
+	}
+	if apiHost != "" && host == apiHost {
 		return strings.HasPrefix(path, "/api/mobile/")
 	}
 	if strings.HasPrefix(path, "/api/mobile/") {
+		return false
+	}
+	if webHost != "" && !isLocalOrPrivateHost(webHost) && host != webHost {
 		return false
 	}
 	return true
 }
 
 func (s *server) isPublicRequestTransportAllowed(r *http.Request) bool {
-	if isLocalOrPrivateHost(requestHost(r)) {
+	if isLocalOrPrivateRequest(r) {
 		return true
 	}
 	if s.cfg.WebProtocol != "https" {
@@ -254,6 +289,9 @@ func (s *server) isPublicRequestTransportAllowed(r *http.Request) bool {
 func (s *server) isHTTPSRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
+	}
+	if !forwardedHeadersTrusted(r) {
+		return false
 	}
 	if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
 		return true
@@ -292,6 +330,13 @@ func (s *server) allowRequestRate(w http.ResponseWriter, r *http.Request) bool {
 		limit = 12
 		window = time.Hour
 		bucket = "mobile-sync"
+	case path == "/api/mobile/discovered/rebuild":
+		limit = 6
+		window = time.Hour
+		bucket = "mobile-discovered-rebuild"
+	case path == "/api/mobile/discovered/fog" || path == "/api/mobile/discovered/coverage":
+		limit = 120
+		bucket = "mobile-map"
 	case path == "/strava/login" || path == "/strava/callback":
 		limit = 40
 		bucket = "web-auth"
@@ -341,19 +386,31 @@ func (s *server) pruneRateLimitsLocked(now time.Time) {
 }
 
 func requestHost(r *http.Request) string {
-	if forwardedHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
-		return strings.Split(forwardedHost, ",")[0]
+	host := normalizeHost(r.Host)
+	if host != "" && !isLocalOrPrivateHost(host) {
+		return host
 	}
-	return r.Host
+	if forwardedHeadersTrusted(r) {
+		if forwardedHost := firstHeaderValue(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
+			return normalizeHost(forwardedHost)
+		}
+	}
+	return host
 }
 
 func clientIP(r *http.Request) string {
-	if value := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); value != "" {
-		return value
+	if forwardedHeadersTrusted(r) {
+		if value := firstHeaderValue(r.Header.Get("CF-Connecting-IP")); value != "" {
+			return value
+		}
+		if value := firstHeaderValue(r.Header.Get("X-Forwarded-For")); value != "" {
+			return value
+		}
 	}
-	if value := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); value != "" {
-		return strings.TrimSpace(strings.Split(value, ",")[0])
-	}
+	return remoteHost(r)
+}
+
+func remoteHost(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host
@@ -361,20 +418,32 @@ func clientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+func firstHeaderValue(value string) string {
+	return strings.TrimSpace(strings.Split(strings.TrimSpace(value), ",")[0])
+}
+
+func forwardedHeadersTrusted(r *http.Request) bool {
+	remote := remoteHost(r)
+	return remote != "" && isLocalOrPrivateHost(remote)
+}
+
+func isLocalOrPrivateRequest(r *http.Request) bool {
+	remote := remoteHost(r)
+	return remote != "" && isLocalOrPrivateHost(requestHost(r)) && isLocalOrPrivateHost(remote)
+}
+
 func normalizeHost(host string) string {
 	host = strings.TrimSpace(strings.ToLower(host))
 	host = strings.TrimPrefix(host, "http://")
 	host = strings.TrimPrefix(host, "https://")
-	if strings.HasPrefix(host, "[") {
-		end := strings.Index(host, "]")
-		if end >= 0 {
-			return strings.Trim(host[:end+1], "[]")
-		}
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	} else if strings.HasPrefix(host, "[") {
+		host = strings.Trim(host, "[]")
+	} else if strings.Count(host, ":") == 1 {
+		host = strings.Split(host, ":")[0]
 	}
-	if idx := strings.LastIndex(host, ":"); idx > -1 {
-		host = host[:idx]
-	}
-	return host
+	return strings.Trim(host, "[]")
 }
 
 func isLocalOrPrivateHost(host string) bool {
@@ -440,7 +509,7 @@ func cacheBustedAsset(path string) string {
 	if strings.Contains(path, "?") {
 		separator = "&"
 	}
-	return fmt.Sprintf("%s%sv=%d", path, separator, info.ModTime().Unix())
+	return fmt.Sprintf("%s%sv=%d", path, separator, info.ModTime().UnixNano())
 }
 
 func (s *server) executeTemplate(w http.ResponseWriter, name string, data interface{}) error {
@@ -1089,7 +1158,7 @@ func (s *server) handleStravaCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("❌ Token exchange error: %v", err)
 		log.Printf("💡 Check that your Strava app's redirect URI matches: %s", s.cfg.StravaRedirectURI)
-		http.Error(w, fmt.Sprintf("token exchange failed: %v", err), http.StatusBadGateway)
+		http.Error(w, "Strava login could not be completed. Check the server logs for details.", http.StatusBadGateway)
 		return
 	}
 	s.token = tok
@@ -1153,9 +1222,8 @@ func (s *server) handleDiscoveredPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.ensureSessionFromRequest(r)
-	if s.user == nil {
-		http.Error(w, "Authentication required", http.StatusUnauthorized)
+	scope, ok := s.webScopeFromRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -1167,9 +1235,9 @@ func (s *server) handleDiscoveredPage(w http.ResponseWriter, r *http.Request) {
 		DiscoveredRevealRadiusMeters   float64
 		DiscoveredSampleDistanceMeters float64
 	}{
-		Athlete:                        s.user,
-		ShowLoginCTA:                   s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:                     s.token != "",
+		Athlete:                        scope.Athlete,
+		ShowLoginCTA:                   scope.StravaToken == "" && s.cfg.StravaClientID != "",
+		Authorized:                     scope.StravaToken != "",
 		DiscoveredMapEnabled:           s.cfg.DiscoveredMapEnabled,
 		DiscoveredRevealRadiusMeters:   s.cfg.DiscoveredRevealRadiusMeters,
 		DiscoveredSampleDistanceMeters: s.cfg.DiscoveredSampleDistanceMeters,
@@ -1186,9 +1254,8 @@ func (s *server) handleDiscoveredAPI(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.ensureSessionFromRequest(r)
-	if s.user == nil {
-		http.Error(w, "Authentication required", http.StatusUnauthorized)
+	scope, ok := s.webScopeFromRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -1199,12 +1266,7 @@ func (s *server) handleDiscoveredAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var status *pggeo.DiscoveredCoverageStatus
-		err := s.withDB(func(conn *pgx.Conn) error {
-			var dbErr error
-			status, dbErr = pggeo.GetDiscoveredCoverageStatus(s.ctx, conn, s.user.ID, s.cfg.DiscoveredSampleDistanceMeters, s.cfg.DiscoveredRevealRadiusMeters)
-			return dbErr
-		})
+		status, err := s.discoveredCoverageStatus(scope.AthleteID)
 		if err != nil {
 			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
@@ -1215,12 +1277,7 @@ func (s *server) handleDiscoveredAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var status *pggeo.DiscoveredCoverageStatus
-		err := s.withDB(func(conn *pgx.Conn) error {
-			var dbErr error
-			status, dbErr = pggeo.RebuildDiscoveredCoverage(s.ctx, conn, s.user.ID, s.cfg.DiscoveredSampleDistanceMeters, s.cfg.DiscoveredRevealRadiusMeters)
-			return dbErr
-		})
+		status, err := s.rebuildDiscoveredCoverage(scope.AthleteID)
 		if err != nil {
 			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
@@ -1236,12 +1293,7 @@ func (s *server) handleDiscoveredAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bbox must be minLng,minLat,maxLng,maxLat", http.StatusBadRequest)
 			return
 		}
-		var featureCollection string
-		err := s.withDB(func(conn *pgx.Conn) error {
-			var dbErr error
-			featureCollection, dbErr = pggeo.GetDiscoveredFogFeatureCollection(s.ctx, conn, s.user.ID, minLng, minLat, maxLng, maxLat, s.cfg.DiscoveredSampleDistanceMeters, s.cfg.DiscoveredRevealRadiusMeters)
-			return dbErr
-		})
+		featureCollection, err := s.discoveredFogFeatureCollection(scope.AthleteID, minLng, minLat, maxLng, maxLat)
 		if err != nil {
 			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
@@ -1258,12 +1310,7 @@ func (s *server) handleDiscoveredAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bbox must be minLng,minLat,maxLng,maxLat", http.StatusBadRequest)
 			return
 		}
-		var featureCollection string
-		err := s.withDB(func(conn *pgx.Conn) error {
-			var dbErr error
-			featureCollection, dbErr = pggeo.GetDiscoveredCoverageFeatureCollection(s.ctx, conn, s.user.ID, minLng, minLat, maxLng, maxLat, s.cfg.DiscoveredSampleDistanceMeters, s.cfg.DiscoveredRevealRadiusMeters)
-			return dbErr
-		})
+		featureCollection, err := s.discoveredCoverageFeatureCollection(scope.AthleteID, minLng, minLat, maxLng, maxLat)
 		if err != nil {
 			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
@@ -1283,10 +1330,16 @@ func parseBBox(raw string) (float64, float64, float64, float64, bool) {
 	values := make([]float64, 4)
 	for i, part := range parts {
 		value, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
-		if err != nil {
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
 			return 0, 0, 0, 0, false
 		}
 		values[i] = value
+	}
+	if values[0] < -180 || values[0] > 180 || values[2] < -180 || values[2] > 180 {
+		return 0, 0, 0, 0, false
+	}
+	if values[1] < -90 || values[1] > 90 || values[3] < -90 || values[3] > 90 {
+		return 0, 0, 0, 0, false
 	}
 	if values[0] >= values[2] || values[1] >= values[3] {
 		return 0, 0, 0, 0, false
@@ -1296,30 +1349,14 @@ func parseBBox(raw string) (float64, float64, float64, float64, bool) {
 
 // handleSegmentsAPI handles GET /api/segments and POST /api/segments
 func (s *server) handleSegmentsAPI(w http.ResponseWriter, r *http.Request) {
-	// Check authentication
-	if s.token == "" {
-		if cookie, err := r.Cookie(stravaTokenCookieName); err == nil {
-			s.token = cookie.Value
-		}
-	}
-	if s.user == nil && s.token != "" {
-		if a, err := strava.FetchCurrentAthlete(s.token); err == nil {
-			s.user = a
-		}
-	}
-	if s.user == nil {
-		http.Error(w, "Authentication required", http.StatusUnauthorized)
+	scope, ok := s.webScopeFromRequest(w, r)
+	if !ok {
 		return
 	}
 
 	switch r.Method {
 	case "GET":
-		var segments []pggeo.FavoriteSegment
-		err := s.withDB(func(conn *pgx.Conn) error {
-			var dbErr error
-			segments, dbErr = pggeo.ListFavoriteSegments(s.ctx, conn, s.user.ID)
-			return dbErr
-		})
+		segments, err := s.listFavoriteSegments(scope.AthleteID)
 		if err != nil {
 			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
@@ -1347,38 +1384,16 @@ func (s *server) handleSegmentsAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Get point samples for the activity
-		var samples []pggeo.PointSample
-		err := s.withDB(func(conn *pgx.Conn) error {
-			var dbErr error
-			samples, dbErr = pggeo.GetPointSamplesForActivity(s.ctx, conn, s.user.ID, req.ActivityID)
-			return dbErr
-		})
+		segment, err := s.createFavoriteSegmentFromActivityRange(scope.AthleteID, req.ActivityID, req.Name, req.Description, req.StartIndex, req.EndIndex)
 		if err != nil {
-			s.handleDBPageError(w, r, err, http.StatusNotFound)
-			return
-		}
-
-		if req.StartIndex >= len(samples) || req.EndIndex > len(samples) {
-			http.Error(w, "index out of range", http.StatusBadRequest)
-			return
-		}
-
-		// Extract points between start and end indices
-		latLngData := make([][]float64, 0, req.EndIndex-req.StartIndex)
-		segmentSamples := make([]pggeo.PointSample, 0, req.EndIndex-req.StartIndex)
-		for i := req.StartIndex; i < req.EndIndex; i++ {
-			latLngData = append(latLngData, []float64{samples[i].Lat, samples[i].Lng})
-			segmentSamples = append(segmentSamples, samples[i])
-		}
-
-		var segment *pggeo.FavoriteSegment
-		err = s.withDB(func(conn *pgx.Conn) error {
-			var dbErr error
-			segment, dbErr = pggeo.InsertFavoriteSegment(s.ctx, conn, s.user.ID, req.Name, req.Description, latLngData, segmentSamples)
-			return dbErr
-		})
-		if err != nil {
+			if errors.Is(err, errSegmentIndexOutOfRange) {
+				http.Error(w, "index out of range", http.StatusBadRequest)
+				return
+			}
+			if errors.Is(err, errActivitySamplesMissing) {
+				s.handleDBPageError(w, r, err, http.StatusNotFound)
+				return
+			}
 			s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 			return
 		}
@@ -1404,26 +1419,26 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check authentication
-	if s.token == "" {
-		if cookie, err := r.Cookie(stravaTokenCookieName); err == nil {
-			s.token = cookie.Value
-		}
+	scope, ok := s.webScopeFromRequest(w, r)
+	if !ok {
+		return
 	}
-	if s.user == nil && s.token != "" {
-		if a, err := strava.FetchCurrentAthlete(s.token); err == nil {
-			s.user = a
+
+	segment, err := s.getOwnedFavoriteSegment(scope.AthleteID, segmentID)
+	if err != nil {
+		if errors.Is(err, errForbidden) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
 		}
-	}
-	if s.user == nil {
-		http.Error(w, "Authentication required", http.StatusUnauthorized)
+		log.Printf("❌ Failed to load segment %d: %v", segmentID, err)
+		s.handleDBPageError(w, r, err, http.StatusNotFound)
 		return
 	}
 
 	switch r.Method {
 	case "GET":
 		// Handle GET /api/segments/:id/graph
-		if len(parts) > 1 && parts[1] == "graph" {
+		if len(parts) == 2 && parts[1] == "graph" {
 			activityIDStr := r.URL.Query().Get("activity_id")
 			if activityIDStr == "" {
 				http.Error(w, "activity_id parameter required", http.StatusBadRequest)
@@ -1449,7 +1464,7 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 
 			var hrZones *strava.HeartRateZones
 			if includeZones {
-				zones, err := strava.FetchHeartRateZones(s.token)
+				zones, err := strava.FetchHeartRateZones(scope.StravaToken)
 				if err == nil && zones != nil {
 					hrZones = &zones.HeartRate
 				}
@@ -1458,7 +1473,7 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			var graphData *pggeo.GraphData
 			err = s.withDB(func(conn *pgx.Conn) error {
 				var dbErr error
-				graphData, dbErr = pggeo.GetGraphDataForSegmentInActivity(s.ctx, conn, s.user.ID, activityID, segmentID, metrics, includeZones, hrZones)
+				graphData, dbErr = pggeo.GetGraphDataForSegmentInActivity(s.ctx, conn, scope.AthleteID, activityID, segmentID, metrics, includeZones, hrZones)
 				return dbErr
 			})
 			if err != nil {
@@ -1470,7 +1485,7 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Handle GET /api/segments/:id/metrics
-		if len(parts) > 1 && parts[1] == "metrics" {
+		if len(parts) == 2 && parts[1] == "metrics" {
 			query := `SELECT * FROM get_segment_metrics($1)`
 			var distanceM, elevationGainM float64
 			err := s.withDB(func(conn *pgx.Conn) error {
@@ -1487,7 +1502,7 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Handle GET /api/segments/:id/activity/:activityId/indices
-		if len(parts) > 2 && parts[1] == "activity" && parts[3] == "indices" {
+		if len(parts) == 4 && parts[1] == "activity" && parts[3] == "indices" {
 			activityID, err := strconv.ParseInt(parts[2], 10, 64)
 			if err != nil {
 				http.Error(w, "invalid activity ID", http.StatusBadRequest)
@@ -1519,7 +1534,7 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			query := `SELECT * FROM find_segment_point_indices($1, $2, $3, $4)`
 			var startIndex, endIndex int
 			err = s.withDB(func(conn *pgx.Conn) error {
-				return conn.QueryRow(s.ctx, query, segmentID, activityID, s.user.ID, tolerance).Scan(&startIndex, &endIndex)
+				return conn.QueryRow(s.ctx, query, segmentID, activityID, scope.AthleteID, tolerance).Scan(&startIndex, &endIndex)
 			})
 			if err != nil {
 				s.handleDBPageError(w, r, err, http.StatusInternalServerError)
@@ -1534,7 +1549,7 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Handle GET /api/segments/:id/activity/:activityId/metrics
-		if len(parts) > 2 && parts[1] == "activity" && parts[3] == "metrics" {
+		if len(parts) == 4 && parts[1] == "activity" && parts[3] == "metrics" {
 			activityID, err := strconv.ParseInt(parts[2], 10, 64)
 			if err != nil {
 				http.Error(w, "invalid activity ID", http.StatusBadRequest)
@@ -1581,7 +1596,7 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			query := `SELECT * FROM get_activity_segment_metrics($1, $2, $3, $4)`
 			var avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds float64
 			err = s.withDB(func(conn *pgx.Conn) error {
-				return conn.QueryRow(s.ctx, query, segmentID, activityID, s.user.ID, tolerance).Scan(&avgHR, &avgSpeed, &distanceM, &elevationGainM, &elapsedSeconds)
+				return conn.QueryRow(s.ctx, query, segmentID, activityID, scope.AthleteID, tolerance).Scan(&avgHR, &avgSpeed, &distanceM, &elevationGainM, &elapsedSeconds)
 			})
 			if err != nil {
 				// If no rows returned (no matching points), return zeros
@@ -1599,7 +1614,7 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			var startIndex, endIndex int
 			idxQuery := `SELECT * FROM find_segment_point_indices($1, $2, $3, $4)`
 			_ = s.withDB(func(conn *pgx.Conn) error {
-				if err := conn.QueryRow(s.ctx, idxQuery, segmentID, activityID, s.user.ID, tolerance).Scan(&startIndex, &endIndex); err != nil {
+				if err := conn.QueryRow(s.ctx, idxQuery, segmentID, activityID, scope.AthleteID, tolerance).Scan(&startIndex, &endIndex); err != nil {
 					return err
 				}
 				return pggeo.CacheSegmentActivityMetrics(s.ctx, conn, segmentID, activityID, tolerance, startIndex, endIndex, avgHR, avgSpeed, distanceM, elevationGainM, elapsedSeconds)
@@ -1615,7 +1630,7 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Handle GET /api/segments/:id/activities
-		if len(parts) > 1 && parts[1] == "activities" {
+		if len(parts) == 2 && parts[1] == "activities" {
 			// Parse query parameters
 			tolerance := 15.0 // default
 			if tolStr := r.URL.Query().Get("tolerance"); tolStr != "" {
@@ -1632,7 +1647,7 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			var activities []pggeo.ActivityWithMatch
 			err := s.withDB(func(conn *pgx.Conn) error {
 				var dbErr error
-				activities, dbErr = pggeo.GetActivitiesForSegment(s.ctx, conn, s.user.ID, segmentID, tolerance, sortBy, forceRefresh)
+				activities, dbErr = pggeo.GetActivitiesForSegment(s.ctx, conn, scope.AthleteID, segmentID, tolerance, sortBy, forceRefresh)
 				return dbErr
 			})
 			if err != nil {
@@ -1640,13 +1655,13 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 				s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 				return
 			}
-			if s.token != "" {
-				if zones, err := strava.FetchHeartRateZones(s.token); err == nil && zones != nil {
+			if scope.StravaToken != "" {
+				if zones, err := strava.FetchHeartRateZones(scope.StravaToken); err == nil && zones != nil {
 					for i := range activities {
 						activityID := activities[i].ID
 						zoneErr := s.withDB(func(conn *pgx.Conn) error {
 							var dbErr error
-							activities[i].SegmentHRZones, dbErr = pggeo.GetHRZoneDistributionForSegmentInActivity(s.ctx, conn, s.user.ID, activityID, segmentID, tolerance, &zones.HeartRate)
+							activities[i].SegmentHRZones, dbErr = pggeo.GetHRZoneDistributionForSegmentInActivity(s.ctx, conn, scope.AthleteID, activityID, segmentID, tolerance, &zones.HeartRate)
 							return dbErr
 						})
 						if zoneErr != nil {
@@ -1661,41 +1676,16 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Regular GET /api/segments/:id
-		var segment *pggeo.FavoriteSegment
-		err = s.withDB(func(conn *pgx.Conn) error {
-			var dbErr error
-			segment, dbErr = pggeo.GetFavoriteSegment(s.ctx, conn, segmentID)
-			return dbErr
-		})
-		if err != nil {
-			log.Printf("❌ Failed to load segment %d: %v", segmentID, err)
-			s.handleDBPageError(w, r, err, http.StatusNotFound)
-			return
-		}
-		// Verify ownership
-		if segment.AthleteID != s.user.ID {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+		if len(parts) != 1 {
+			http.NotFound(w, r)
 			return
 		}
 		writeJSON(w, segment)
 	case "DELETE":
-		// Verify ownership before deleting
-		var segment *pggeo.FavoriteSegment
-		err = s.withDB(func(conn *pgx.Conn) error {
-			var dbErr error
-			segment, dbErr = pggeo.GetFavoriteSegment(s.ctx, conn, segmentID)
-			return dbErr
-		})
-		if err != nil {
-			log.Printf("❌ Failed to load segment %d for delete: %v", segmentID, err)
-			s.handleDBPageError(w, r, err, http.StatusNotFound)
+		if len(parts) != 1 {
+			http.NotFound(w, r)
 			return
 		}
-		if segment.AthleteID != s.user.ID {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-
 		err = s.withDB(func(conn *pgx.Conn) error {
 			return pggeo.DeleteFavoriteSegment(s.ctx, conn, segmentID)
 		})
@@ -1713,28 +1703,12 @@ func (s *server) handleSegmentAPI(w http.ResponseWriter, r *http.Request) {
 
 // handleSegmentsPage handles GET /segments - renders the segments list page
 func (s *server) handleSegmentsPage(w http.ResponseWriter, r *http.Request) {
-	// Check authentication
-	if s.token == "" {
-		if cookie, err := r.Cookie(stravaTokenCookieName); err == nil {
-			s.token = cookie.Value
-		}
-	}
-	if s.user == nil && s.token != "" {
-		if a, err := strava.FetchCurrentAthlete(s.token); err == nil {
-			s.user = a
-		}
-	}
-	if s.user == nil {
-		http.Error(w, "Authentication required", http.StatusUnauthorized)
+	scope, ok := s.webScopeFromRequest(w, r)
+	if !ok {
 		return
 	}
 
-	var segments []pggeo.SegmentDashboardSummary
-	err := s.withDB(func(conn *pgx.Conn) error {
-		var dbErr error
-		segments, dbErr = pggeo.ListSegmentDashboardSummaries(s.ctx, conn, s.user.ID, 15.0)
-		return dbErr
-	})
+	segments, err := s.listSegmentDashboardSummaries(scope.AthleteID, 15.0)
 	if err != nil {
 		s.handleDBPageError(w, r, err, http.StatusInternalServerError)
 		return
@@ -1748,9 +1722,9 @@ func (s *server) handleSegmentsPage(w http.ResponseWriter, r *http.Request) {
 		DiscoveredMapEnabled bool
 	}{
 		Segments:             segments,
-		Athlete:              s.user,
-		ShowLoginCTA:         s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:           s.token != "",
+		Athlete:              scope.Athlete,
+		ShowLoginCTA:         scope.StravaToken == "" && s.cfg.StravaClientID != "",
+		Authorized:           scope.StravaToken != "",
 		DiscoveredMapEnabled: s.cfg.DiscoveredMapEnabled,
 	}
 
@@ -1775,37 +1749,18 @@ func (s *server) handleSegmentPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check authentication
-	if s.token == "" {
-		if cookie, err := r.Cookie(stravaTokenCookieName); err == nil {
-			s.token = cookie.Value
-		}
-	}
-	if s.user == nil && s.token != "" {
-		if a, err := strava.FetchCurrentAthlete(s.token); err == nil {
-			s.user = a
-		}
-	}
-	if s.user == nil {
-		http.Error(w, "Authentication required", http.StatusUnauthorized)
+	scope, ok := s.webScopeFromRequest(w, r)
+	if !ok {
 		return
 	}
 
-	// Get segment
-	var segment *pggeo.FavoriteSegment
-	err = s.withDB(func(conn *pgx.Conn) error {
-		var dbErr error
-		segment, dbErr = pggeo.GetFavoriteSegment(s.ctx, conn, segmentID)
-		return dbErr
-	})
+	segment, err := s.getOwnedFavoriteSegment(scope.AthleteID, segmentID)
 	if err != nil {
+		if errors.Is(err, errForbidden) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 		s.handleDBPageError(w, r, err, http.StatusNotFound)
-		return
-	}
-
-	// Verify ownership
-	if segment.AthleteID != s.user.ID {
-		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -1818,9 +1773,9 @@ func (s *server) handleSegmentPage(w http.ResponseWriter, r *http.Request) {
 		DiscoveredMapEnabled bool
 	}{
 		Segment:              segment,
-		Athlete:              s.user,
-		ShowLoginCTA:         s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:           s.token != "",
+		Athlete:              scope.Athlete,
+		ShowLoginCTA:         scope.StravaToken == "" && s.cfg.StravaClientID != "",
+		Authorized:           scope.StravaToken != "",
 		MobileActivityOrder:  s.cfg.MobileActivityOrder,
 		DiscoveredMapEnabled: s.cfg.DiscoveredMapEnabled,
 	}
@@ -1832,45 +1787,97 @@ func (s *server) handleSegmentPage(w http.ResponseWriter, r *http.Request) {
 }
 
 type profileBikeStat struct {
-	GearID     string
-	Label      string
-	DistanceKM float64
-	Activities int
+	GearID     string  `json:"gear_id"`
+	Label      string  `json:"label"`
+	DistanceKM float64 `json:"distance_km"`
+	Activities int     `json:"activities"`
 }
 
 type profilePeriodStat struct {
-	Label      string
-	Activities int
+	Label      string `json:"label"`
+	Activities int    `json:"activities"`
 }
 
 type profileHRZone struct {
-	Label string
-	Range string
+	Label string `json:"label"`
+	Range string `json:"range"`
+}
+
+type profileData struct {
+	Athlete              *strava.Athlete   `json:"athlete"`
+	ShowLoginCTA         bool              `json:"show_login_cta"`
+	Authorized           bool              `json:"authorized"`
+	HRZones              []profileHRZone   `json:"hr_zones"`
+	HRZonesError         string            `json:"hr_zones_error,omitempty"`
+	TotalBikeKM          float64           `json:"total_bike_km"`
+	TotalActivities      int               `json:"total_activities"`
+	BikeStats            []profileBikeStat `json:"bike_stats"`
+	BestMonth            profilePeriodStat `json:"best_month"`
+	BestYear             profilePeriodStat `json:"best_year"`
+	HasRecordedRides     bool              `json:"has_recorded_rides"`
+	HasRecordedMonths    bool              `json:"has_recorded_months"`
+	DiscoveredMapEnabled bool              `json:"discovered_map_enabled"`
 }
 
 func (s *server) handleProfilePage(w http.ResponseWriter, r *http.Request) {
-	s.ensureSessionFromRequest(r)
-	if s.user == nil {
-		http.Error(w, "Authentication required", http.StatusUnauthorized)
+	scope, ok := s.webScopeFromRequest(w, r)
+	if !ok {
 		return
+	}
+	data, err := s.buildProfileData(scope)
+	if err != nil {
+		s.handleDBPageError(w, r, err, http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.executeTemplate(w, "profile.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *server) buildProfileData(scope athleteScope) (profileData, error) {
+	if scope.AthleteID == 0 || scope.Athlete == nil {
+		return profileData{}, fmt.Errorf("profile requires an authenticated athlete")
 	}
 
 	var activities []strava.ActivitySummary
 	err := s.withDB(func(conn *pgx.Conn) error {
 		var dbErr error
-		activities, dbErr = pggeo.GetAllActivities(s.ctx, conn, s.user.ID)
+		activities, dbErr = pggeo.GetAllActivities(s.ctx, conn, scope.AthleteID)
 		return dbErr
 	})
 	if err != nil {
-		s.handleDBPageError(w, r, err, http.StatusInternalServerError)
-		return
+		return profileData{}, err
 	}
 	activities = s.enrichGearNames(activities)
 
+	zones, zonesError := buildProfileHRZones(scope.StravaToken)
+	bikeStats, totalBikeKM := buildBikeStats(activities)
+	bestMonth, bestYear := findBusiestPeriods(activities)
+
+	return profileData{
+		Athlete:              scope.Athlete,
+		ShowLoginCTA:         scope.StravaToken == "" && s.cfg.StravaClientID != "",
+		Authorized:           scope.StravaToken != "",
+		HRZones:              zones,
+		HRZonesError:         zonesError,
+		TotalBikeKM:          totalBikeKM,
+		TotalActivities:      len(activities),
+		BikeStats:            bikeStats,
+		BestMonth:            bestMonth,
+		BestYear:             bestYear,
+		HasRecordedRides:     len(bikeStats) > 0,
+		HasRecordedMonths:    bestMonth.Activities > 0 || bestYear.Activities > 0,
+		DiscoveredMapEnabled: s.cfg.DiscoveredMapEnabled,
+	}, nil
+}
+
+func buildProfileHRZones(token string) ([]profileHRZone, string) {
 	var zones []profileHRZone
 	var zonesError string
-	if s.token != "" {
-		athleteZones, err := strava.FetchHeartRateZones(s.token)
+	if token != "" {
+		athleteZones, err := strava.FetchHeartRateZones(token)
 		if err != nil {
 			zonesError = err.Error()
 		} else if athleteZones != nil {
@@ -1882,44 +1889,7 @@ func (s *server) handleProfilePage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
-	bikeStats, totalBikeKM := buildBikeStats(activities)
-	bestMonth, bestYear := findBusiestPeriods(activities)
-
-	data := struct {
-		Athlete              *strava.Athlete
-		ShowLoginCTA         bool
-		Authorized           bool
-		HRZones              []profileHRZone
-		HRZonesError         string
-		TotalBikeKM          float64
-		TotalActivities      int
-		BikeStats            []profileBikeStat
-		BestMonth            profilePeriodStat
-		BestYear             profilePeriodStat
-		HasRecordedRides     bool
-		HasRecordedMonths    bool
-		DiscoveredMapEnabled bool
-	}{
-		Athlete:              s.user,
-		ShowLoginCTA:         s.token == "" && s.cfg.StravaClientID != "",
-		Authorized:           s.token != "",
-		HRZones:              zones,
-		HRZonesError:         zonesError,
-		TotalBikeKM:          totalBikeKM,
-		TotalActivities:      len(activities),
-		BikeStats:            bikeStats,
-		BestMonth:            bestMonth,
-		BestYear:             bestYear,
-		HasRecordedRides:     len(bikeStats) > 0,
-		HasRecordedMonths:    bestMonth.Activities > 0 || bestYear.Activities > 0,
-		DiscoveredMapEnabled: s.cfg.DiscoveredMapEnabled,
-	}
-
-	if err := s.executeTemplate(w, "profile.html", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	return zones, zonesError
 }
 
 func buildBikeStats(activities []strava.ActivitySummary) ([]profileBikeStat, float64) {

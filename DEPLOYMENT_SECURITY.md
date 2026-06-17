@@ -10,10 +10,18 @@ The web UI can stay behind Cloudflare Access SSO. The native API must remain
 reachable by iOS without browser SSO and must rely on B11K bearer session
 tokens.
 
+Current web auth is intentionally single-user/self-hosted. Do not expose the web
+UI without Cloudflare Access or an equivalent gate unless web sessions are
+refactored to be per-user. The native API is the only public unauthenticated
+surface, and every non-auth mobile endpoint must require a B11K bearer session
+token.
+
 ## What Is Ready On Localhost/LAN
 
 - `B11K_PUBLIC_API_HOST` / `public_api_host` lets the backend know which host is
   the native API host.
+- `B11K_WEB_HOST` / `web_host` lets the backend reject unknown public Host
+  headers when a production web host is configured.
 - Requests to the configured API host are limited to `/api/mobile/*`.
 - Requests to other public hosts are not allowed to use `/api/mobile/*`.
 - Localhost and private LAN hosts are exempt so iPhone development still works.
@@ -22,6 +30,9 @@ tokens.
 - Docker defaults no longer force the rejected `b11k://strava-callback`
   redirect URI.
 - Public HTTPS deployments reject non-HTTPS forwarded requests.
+- Forwarded host, protocol, and client IP headers are trusted only when the
+  immediate peer is localhost or a private network proxy, such as Cloudflare
+  Tunnel forwarding to `localhost`.
 - Mobile API responses are marked `Cache-Control: no-store`.
 - Browser-origin requests to `/api/mobile/*` are rejected, except the Strava
   callback endpoint.
