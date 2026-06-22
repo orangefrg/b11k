@@ -6,7 +6,6 @@ struct SettingsView: View {
 
     private enum SettingsField: Hashable {
         case backendURL
-        case rebuildConfirmation
     }
 
     var body: some View {
@@ -88,31 +87,6 @@ struct SettingsView: View {
 
                 LabeledContent("Stored activities", value: "\(viewModel.activityCount)")
                 LabeledContent("Loaded on device", value: "\(viewModel.activities.count)")
-            }
-
-            Section("Developer") {
-                TextField("REBUILD", text: $viewModel.rebuildConfirmation)
-                    .textInputAutocapitalization(.characters)
-                    .autocorrectionDisabled()
-                    .focused($focusedField, equals: .rebuildConfirmation)
-                    .submitLabel(.done)
-                    .onSubmit {
-                        focusedField = nil
-                    }
-
-                Button(viewModel.isRebuildingDatabase ? "Rebuilding..." : "Rebuild DB and Sync") {
-                    focusedField = nil
-                    Task { await viewModel.rebuildDatabaseAndSync() }
-                }
-                .disabled(!viewModel.canRebuildDatabase)
-
-                if let storage = viewModel.rebuildStorage {
-                    LabeledContent("Activities", value: "\(storage.activities)")
-                    LabeledContent("Route geometries", value: "\(storage.activityGeometries)")
-                    LabeledContent("Sample rows", value: "\(storage.pointSamples)")
-                    LabeledContent("Activities with samples", value: "\(storage.activitiesWithPointSamples)")
-                    LabeledContent("Activities with geometry", value: "\(storage.activitiesWithGeometry)")
-                }
             }
 
             if !viewModel.logLines.isEmpty {

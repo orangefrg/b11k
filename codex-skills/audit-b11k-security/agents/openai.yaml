@@ -1,4 +1,0 @@
-interface:
-  display_name: "B11K Security Audit"
-  short_description: "Audit B11K iOS and Go backend security"
-  default_prompt: "Use $audit-b11k-security to run a full security audit of the B11K iOS app and Go backend."

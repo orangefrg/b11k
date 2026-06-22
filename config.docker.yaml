@@ -9,7 +9,6 @@ public_api_host: ""
 web_port: 8080
 web_protocol: http
 token_encryption_key: ""
-enable_dev_api: false
 dev_reload_templates: false
 mobile_activity_order: stats_first
 discovered_map_enabled: true

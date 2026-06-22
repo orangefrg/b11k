@@ -41,7 +41,6 @@ type Config struct {
 	WebPort                        string
 	WebProtocol                    string
 	TokenEncryptionKey             string
-	EnableDevAPI                   bool
 	DevReloadTemplates             bool
 	MobileActivityOrder            string
 	DiscoveredMapEnabled           bool
@@ -67,7 +66,7 @@ type server struct {
 	secretBox         *secretBox
 }
 
-const stravaTokenCookieName = "strava_token"
+const stravaTokenCookieName = "strava_token" // #nosec G101 -- cookie name only; not a credential value.
 const mobileSessionLifetime = 90 * 24 * time.Hour
 
 type mobileSession struct {
@@ -138,9 +137,6 @@ func RunServer(ctx context.Context, cfg Config) {
 	if cfg.PublicAPIHost != "" {
 		log.Printf("🔐 Public API host configured: %s", cfg.PublicAPIHost)
 	}
-	if cfg.EnableDevAPI {
-		log.Printf("🧪 Dev API enabled for local/private network requests")
-	}
 
 	// Routes
 	mux := http.NewServeMux()
@@ -161,7 +157,6 @@ func RunServer(ctx context.Context, cfg Config) {
 	mux.HandleFunc("/api/mobile/profile", s.handleMobileProfile)
 	mux.HandleFunc("/api/mobile/logout", s.handleMobileLogout)
 	mux.HandleFunc("/api/mobile/sync", s.handleMobileSync)
-	mux.HandleFunc("/api/mobile/dev/rebuild-sync", s.handleMobileDevRebuildSync)
 	mux.HandleFunc("/api/mobile/activities", s.handleMobileActivities)
 	mux.HandleFunc("/api/mobile/activities/", s.handleMobileActivities)
 	mux.HandleFunc("/api/mobile/segments", s.handleMobileSegments)
@@ -248,10 +243,6 @@ func (s *server) isRequestAllowed(r *http.Request) bool {
 	if path == "/api/mobile/auth/callback" {
 		return true
 	}
-	if strings.HasPrefix(path, "/api/mobile/dev/") {
-		return s.cfg.EnableDevAPI && isLocalOrPrivateRequest(r)
-	}
-
 	apiHost := normalizeHost(s.cfg.PublicAPIHost)
 	webHost := normalizeHost(s.cfg.WebHost)
 	if apiHost == "" && webHost == "" {
@@ -420,6 +411,11 @@ func remoteHost(r *http.Request) string {
 
 func firstHeaderValue(value string) string {
 	return strings.TrimSpace(strings.Split(strings.TrimSpace(value), ",")[0])
+}
+
+func safeLogText(value string) string {
+	value = strings.ReplaceAll(value, "\n", "\\n")
+	return strings.ReplaceAll(value, "\r", "\\r")
 }
 
 func forwardedHeadersTrusted(r *http.Request) bool {
@@ -591,7 +587,8 @@ func isRecoverableDBError(err error) bool {
 }
 
 func (s *server) renderDatabaseBusy(w http.ResponseWriter, r *http.Request, err error) {
-	log.Printf("⚠️ Database still recovering for %s: %v", r.URL.Path, err)
+	// #nosec G706 -- request path is escaped before logging.
+	log.Printf("⚠️ Database still recovering for %s: %v", safeLogText(r.URL.Path), err)
 	w.Header().Set("Retry-After", "2")
 	if strings.HasPrefix(r.URL.Path, "/api/") || strings.Contains(r.Header.Get("Accept"), "application/json") {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1149,10 +1146,6 @@ func (s *server) handleStravaCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log the callback for debugging
-	log.Printf("🔐 Strava callback received from: %s", r.RemoteAddr)
-	log.Printf("📋 Using redirect URI: %s", s.cfg.StravaRedirectURI)
-
 	authCfg := strava.NewStravaAuthConfig(s.cfg.StravaClientID, s.cfg.StravaClientSecret, s.cfg.StravaRedirectURI)
 	tok, err := strava.ExchangeCodeForToken(*authCfg, code)
 	if err != nil {
@@ -1163,7 +1156,7 @@ func (s *server) handleStravaCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.token = tok
 
-	// Set secure HTTP-only cookie with token
+	// #nosec G124 -- local HTTP needs an insecure cookie; production HTTPS requests set Secure.
 	http.SetCookie(w, &http.Cookie{
 		Name:     stravaTokenCookieName,
 		Value:    tok,
@@ -1187,7 +1180,7 @@ func (s *server) handleStravaLogout(w http.ResponseWriter, r *http.Request) {
 	// Clear the token from memory
 	s.token = ""
 
-	// Clear the cookie
+	// #nosec G124 -- local HTTP needs an insecure cookie; production HTTPS requests set Secure.
 	http.SetCookie(w, &http.Cookie{
 		Name:     stravaTokenCookieName,
 		Value:    "",

@@ -166,7 +166,9 @@ func ConsoleLogin(config StravaAuthConfig) (string, error) {
 	fmt.Println(generateStravaAuthURL(config))
 	fmt.Println("Enter the code:")
 	var code string
-	fmt.Scanln(&code)
+	if _, err := fmt.Scanln(&code); err != nil {
+		return "", fmt.Errorf("read authorization code: %w", err)
+	}
 	token, err := exchangeCodeForToken(config, code)
 	if err != nil {
 		fmt.Println("Error exchanging code for token:", err)

@@ -720,7 +720,6 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     @Published var showingMessage = false
     @Published var isAuthenticating = false
     @Published var isSyncing = false
-    @Published var isRebuildingDatabase = false
     @Published var isLoadingActivities = false
     @Published var isLoadingSegments = false
     @Published var isLoadingSegmentEfforts = false
@@ -732,8 +731,6 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     @Published var isLoggingOut = false
     @Published var isMutatingSegment = false
     @Published var isWaitingForBrowserAuth = false
-    @Published var rebuildConfirmation = ""
-    @Published var rebuildStorage: RebuildStorage?
 
     @Published var startDate: Date = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
     @Published var endDate: Date = Date()
@@ -760,11 +757,7 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     }
 
     var isBusy: Bool {
-        isAuthenticating || isSyncing || isRebuildingDatabase || isLoadingActivities || isLoadingSegments || isLoadingSegmentEfforts || isLoadingSegmentEffortDetail || isLoadingDiscovered || isLoadingDiscoveredMap || isRebuildingDiscovered || isLoadingProfile || isLoggingOut || isMutatingSegment
-    }
-
-    var canRebuildDatabase: Bool {
-        isAuthorized && !isBusy && rebuildConfirmation.trimmingCharacters(in: .whitespacesAndNewlines) == "REBUILD"
+        isAuthenticating || isSyncing || isLoadingActivities || isLoadingSegments || isLoadingSegmentEfforts || isLoadingSegmentEffortDetail || isLoadingDiscovered || isLoadingDiscoveredMap || isRebuildingDiscovered || isLoadingProfile || isLoggingOut || isMutatingSegment
     }
 
     var activityStats: ActivityStats? {
@@ -965,47 +958,6 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
             let response: SyncResponse = try await request(url, method: "POST", authorized: true)
             syncSummary = response.summary
             logLines = response.logs.isEmpty ? ["Sync complete."] : response.logs
-            profile = nil
-            await loadActivities(reset: true)
-            await loadSegments()
-            await loadDiscoveredStatus()
-        } catch {
-            handleRequestError(error)
-        }
-    }
-
-    func rebuildDatabaseAndSync() async {
-        guard let baseURL else {
-            show("Enter a valid backend URL.")
-            return
-        }
-        guard rebuildConfirmation.trimmingCharacters(in: .whitespacesAndNewlines) == "REBUILD" else {
-            show("Type REBUILD before running the live test.")
-            return
-        }
-
-        isRebuildingDatabase = true
-        syncSummary = nil
-        rebuildStorage = nil
-        logLines = ["Rebuild test started..."]
-        defer { isRebuildingDatabase = false }
-
-        do {
-            var components = URLComponents(url: baseURL.appending(path: "/api/mobile/dev/rebuild-sync"), resolvingAgainstBaseURL: false)
-            components?.queryItems = [
-                URLQueryItem(name: "start", value: Self.dateFormatter.string(from: startDate)),
-                URLQueryItem(name: "end", value: Self.dateFormatter.string(from: endDate))
-            ]
-            guard let url = components?.url else {
-                show("Could not build rebuild URL.")
-                return
-            }
-            let body = RebuildSyncRequest(confirmation: "REBUILD")
-            let response: RebuildSyncResponse = try await request(url, method: "POST", body: body, authorized: true)
-            syncSummary = response.summary
-            rebuildStorage = response.storage
-            logLines = response.logs.isEmpty ? ["Rebuild test complete."] : response.logs
-            rebuildConfirmation = ""
             profile = nil
             await loadActivities(reset: true)
             await loadSegments()
@@ -1442,7 +1394,6 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
         activityPage = 1
         hasMoreActivities = false
         syncSummary = nil
-        rebuildStorage = nil
         isWaitingForBrowserAuth = false
         pendingState = nil
     }
@@ -2483,31 +2434,6 @@ struct SyncSummary: Decodable {
     let failed: Int
 }
 
-struct RebuildSyncRequest: Encodable {
-    let confirmation: String
-}
-
-struct RebuildSyncResponse: Decodable {
-    let summary: SyncSummary
-    let logs: [String]
-    let storage: RebuildStorage
-}
-
-struct RebuildStorage: Decodable {
-    let activities: Int
-    let activityGeometries: Int
-    let pointSamples: Int
-    let activitiesWithPointSamples: Int
-    let activitiesWithGeometry: Int
-
-    enum CodingKeys: String, CodingKey {
-        case activities
-        case activityGeometries = "activity_geometries"
-        case pointSamples = "point_samples"
-        case activitiesWithPointSamples = "activities_with_point_samples"
-        case activitiesWithGeometry = "activities_with_geometry"
-    }
-}
 
 struct Athlete: Decodable {
     let id: Int64

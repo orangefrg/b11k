@@ -113,38 +113,6 @@ func TestBrowserOriginMobileAPIRequestsAreRejected(t *testing.T) {
 	}
 }
 
-func TestRequestGateKeepsDevAPIPrivate(t *testing.T) {
-	tests := []struct {
-		name      string
-		enableDev bool
-		host      string
-		wantAllow bool
-	}{
-		{name: "disabled on LAN", enableDev: false, host: "10.0.0.42:8080", wantAllow: false},
-		{name: "enabled on LAN", enableDev: true, host: "10.0.0.42:8080", wantAllow: true},
-		{name: "enabled still blocked on public host", enableDev: true, host: "api.b11k.example.com", wantAllow: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &server{
-				cfg: Config{
-					PublicAPIHost: "api.b11k.example.com",
-					EnableDevAPI:  tt.enableDev,
-				},
-			}
-			remote := publicRemote
-			if tt.host == "10.0.0.42:8080" {
-				remote = privateRemote
-			}
-			req := newHostRequest(t, http.MethodPost, tt.host, "/api/mobile/dev/rebuild-sync", remote)
-			if got := s.isRequestAllowed(req); got != tt.wantAllow {
-				t.Fatalf("isRequestAllowed(dev, host=%q, enable=%v) = %v, want %v", tt.host, tt.enableDev, got, tt.wantAllow)
-			}
-		})
-	}
-}
-
 func TestRequestGateRejectsUnknownPublicHostWhenWebHostConfigured(t *testing.T) {
 	s := &server{
 		cfg: Config{

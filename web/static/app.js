@@ -599,13 +599,10 @@
         };
 
         if (metric1Select && metric2Select && graphCanvas) {
-          console.log('Graph elements found, setting up graph functionality');
           const updateGraph = async () => {
             const metric1 = metric1Select.value;
             const metric2 = metric2Select.value;
             const xAxisType = xAxisSelect ? xAxisSelect.value : 'time';
-            
-            console.log('updateGraph called with metrics:', metric1, metric2, 'xAxis:', xAxisType);
             
             const placeholder = document.getElementById('graph-placeholder');
             
@@ -637,8 +634,6 @@
             const includeZones = metric1 === 'heartrate' || metric2 === 'heartrate';
             const url = `/api/activities/${id}/graph?metrics=${metrics.join(',')}&include_zones=${includeZones}`;
             
-            console.log('Fetching graph data from:', url);
-            
             try {
               const response = await fetch(url);
               if (!response.ok) {
@@ -646,7 +641,6 @@
                 throw new Error(`Failed to fetch graph data: ${response.status} ${errorText}`);
               }
               const data = await response.json();
-              console.log('Graph data received:', data);
               
               // Store points for synchronization
               graphPoints = points;

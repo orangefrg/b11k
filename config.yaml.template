@@ -12,7 +12,6 @@ public_api_host: ""  # Production API hostname, e.g. api.b11k.example.com; leave
 web_port: 8080  # Port to listen on (use non-privileged port 1024+, not 80/443)
 web_protocol: http  # "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy (only affects redirect URI, not listening port)
 token_encryption_key: ""  # Prefer B11K_TOKEN_ENCRYPTION_KEY; generate with: openssl rand -base64 32
-enable_dev_api: false  # Enables destructive local/private-LAN test endpoints such as /api/mobile/dev/rebuild-sync
 dev_reload_templates: false  # Set B11K_DEV_RELOAD_TEMPLATES=true for local live-testing
 mobile_activity_order: stats_first  # "stats_first" or "map_first" on narrow screens
 discovered_map_enabled: true  # Set false to disable the Discovered page, APIs, and sync rebuilds

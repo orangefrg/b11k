@@ -19,8 +19,6 @@ Copyright (c) 2025 B11K contributors
   effort details, sync, settings, and Discovered map metadata/map views.
 - Uses MapLibre GL JS, Chart.js, server-rendered templates, and static assets.
 - Supports live development with Docker Compose and a mounted checkout.
-- Includes a Codex security audit skill for repeatable source/dependency/mobile
-  security checks.
 
 ## Project Layout
 
@@ -33,8 +31,6 @@ internal/web/                Web UI, mobile API, auth, security middleware
 web/templates/               Server-rendered HTML templates
 web/static/                  CSS, JS, icons, local map style
 iosApp/B11k/                 SwiftUI iOS app and iOS docs
-codex-skills/audit-b11k-security/
-                             Local Codex security audit skill
 ```
 
 ## Prerequisites
@@ -44,9 +40,8 @@ codex-skills/audit-b11k-security/
 - Strava API credentials: client ID and client secret.
 - Go 1.25+ for local builds; Go 1.26.4+ is recommended for production parity.
 - Xcode for the iOS app.
-- Optional security tools for the audit skill: `gitleaks`, `trivy`,
-  `osv-scanner`, `semgrep`, `govulncheck`, `gosec`, `mobsfscan`, MobSF, ZAP,
-  and CodeQL.
+- Optional release checks: `gitleaks`, `govulncheck`, `gosec`, `semgrep`,
+  `trivy`, `osv-scanner`, and iOS static analysis tools.
 
 ## Quick Start
 
@@ -70,7 +65,6 @@ B11K_STRAVA_CLIENT_SECRET=...
 B11K_PG_PASSWORD=change-this-password
 B11K_WEB_HOST=localhost
 B11K_WEB_PROTOCOL=http
-B11K_ENABLE_DEV_API=false
 ```
 
 ## Live Development
@@ -102,7 +96,6 @@ For local device testing:
 
    ```env
    B11K_IOS_REDIRECT_URI=http://<your-lan-ip>:8080/api/mobile/auth/callback
-   B11K_ENABLE_DEV_API=true
    ```
 
 3. In Strava app settings, set the callback domain to `<your-lan-ip>`.
@@ -183,7 +176,6 @@ Common environment variables:
 | `B11K_WEB_PROTOCOL` | `http` for local, `https` for production |
 | `B11K_WEB_HOST_PORT` | Host port for Docker Compose |
 | `B11K_TOKEN_ENCRYPTION_KEY` | Base64 32-byte key for Strava token encryption |
-| `B11K_ENABLE_DEV_API` | Enables local/private `/api/mobile/dev/*` endpoints |
 | `B11K_DEV_RELOAD_TEMPLATES` | Reload templates from disk on refresh |
 | `B11K_MOBILE_ACTIVITY_ORDER` | `stats_first` or `map_first` on narrow screens |
 | `B11K_DISCOVERED_MAP_ENABLED` | Enables web/mobile Discovered map endpoints |
@@ -265,7 +257,6 @@ Current hardening includes:
   expensive rebuild paths.
 - Mobile API `Cache-Control: no-store`.
 - Browser-origin rejection for bearer mobile API endpoints.
-- Local/private-only dev API.
 - iOS release protection against plain HTTP bearer requests.
 - iOS ATS local-network exception instead of global arbitrary loads.
 - Docker runtime image pinned, non-root user, and healthcheck.
@@ -279,41 +270,6 @@ shape is:
 - Native API: `https://api.b11k.example.com`, not protected by browser SSO, and
   protected by B11K bearer sessions.
 
-## Codex Security Audit Skill
-
-This repo includes a local Codex skill at
-`codex-skills/audit-b11k-security/`. Use it when auditing the iOS app, Go
-backend, mobile API, deployment config, residue/secrets, dependencies, or
-publishing readiness.
-
-Run the bundled audit runner from the repo root:
-
-```bash
-B11K_AUDIT_OUT=/tmp/b11k-security-audit \
-B11K_AUDIT_XCODE_ANALYZE=1 \
-bash codex-skills/audit-b11k-security/scripts/run_b11k_security_audit.sh "$PWD"
-```
-
-Optional dynamic/package inputs:
-
-```bash
-B11K_IPA_PATH=/absolute/path/B11k.ipa
-B11K_ZAP_TARGET=https://local-or-staging-target
-B11K_SEMGREP_CONFIG=p/default
-B11K_AUDIT_TOOL_CHECK_ONLY=1
-```
-
-The runner writes reports under `/tmp` by default and redacts secret scanner
-output. It treats scanner output as leads, so manually validate findings before
-publishing a report. Detailed review guidance lives in:
-
-- `codex-skills/audit-b11k-security/references/checklist.md`
-- `codex-skills/audit-b11k-security/references/tools.md`
-
-Local `.env`, `config.yaml`, Xcode `xcuserdata`, archives, IPA exports, scanner
-reports, and logs should stay untracked. Never paste token values, Strava
-secrets, database URLs, device IDs, or private deployment domains into reports.
-
 ## Publishing Checklist
 
 Before installing on another phone or shipping beyond local development:
@@ -325,19 +281,16 @@ Before installing on another phone or shipping beyond local development:
 5. Set `B11K_PUBLIC_API_HOST` for the native API host.
 6. Set `B11K_WEB_HOST` for the web UI host.
 7. Set `B11K_TOKEN_ENCRYPTION_KEY`.
-8. Keep `B11K_ENABLE_DEV_API=false`.
-9. Keep the web UI behind SSO unless web sessions are redesigned.
-10. Run `go test ./...`, an iOS build/analyze pass, and the audit skill.
+8. Keep the web UI behind SSO unless web sessions are redesigned.
+9. Run `go test ./...`, a secret scan, and an iOS build/analyze pass.
 
 ## More Docs
 
 - `INSTALL.md` - detailed installation and PostgreSQL setup.
 - `DEPLOYMENT_SECURITY.md` - public exposure, Cloudflare, and production smoke
   tests.
-- `iosApp/B11k/LOCAL_BACKEND_IPHONE_TESTING.md` - LAN iPhone testing.
 - `iosApp/B11k/IOS_DISTRIBUTION.md` - personal device, TestFlight, and App
   Store notes.
-- `iosApp/B11k/IOS_IMPLEMENTATION_PLAN.md` - iOS implementation notes.
 
 ## License
 
