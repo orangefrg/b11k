@@ -17,19 +17,6 @@ struct ContentView: View {
     var body: some View {
         TabView {
             NavigationStack {
-                SyncView(viewModel: viewModel)
-                    .navigationTitle("B11K")
-                    .toolbar {
-                        if viewModel.isBusy {
-                            ProgressView()
-                        }
-                    }
-            }
-            .tabItem {
-                Label("Sync", systemImage: "arrow.triangle.2.circlepath")
-            }
-
-            NavigationStack {
                 ActivitiesView(viewModel: viewModel)
                     .navigationTitle("Activities")
                     .toolbar {
@@ -46,6 +33,73 @@ struct ContentView: View {
             .tabItem {
                 Label("Activities", systemImage: "list.bullet")
             }
+
+            NavigationStack {
+                SegmentsView(viewModel: viewModel)
+                    .navigationTitle("Segments")
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                Task { await viewModel.loadSegments() }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                            .disabled(!viewModel.isAuthorized || viewModel.isBusy)
+                        }
+                    }
+            }
+            .tabItem {
+                Label("Segments", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+            }
+
+            NavigationStack {
+                DiscoveredView(viewModel: viewModel)
+                    .navigationTitle("Discovered")
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                Task { await viewModel.loadDiscoveredStatus() }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                            .disabled(!viewModel.isAuthorized || viewModel.isBusy)
+                        }
+                    }
+            }
+            .tabItem {
+                Label("Discovered", systemImage: "map")
+            }
+
+            NavigationStack {
+                ProfileView(viewModel: viewModel)
+                    .navigationTitle("Profile")
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                Task { await viewModel.loadProfile() }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                            .disabled(!viewModel.isAuthorized || viewModel.isBusy)
+                        }
+                    }
+            }
+            .tabItem {
+                Label("Profile", systemImage: "person.crop.circle")
+            }
+
+            NavigationStack {
+                SettingsView(viewModel: viewModel)
+                    .navigationTitle("Settings")
+                    .toolbar {
+                        if viewModel.isBusy {
+                            ProgressView()
+                        }
+                    }
+            }
+            .tabItem {
+                Label("Settings", systemImage: "gearshape")
+            }
         }
         .onOpenURL { url in
             Task { await viewModel.handleAuthCallback(url) }
@@ -60,151 +114,6 @@ struct ContentView: View {
         }
     }
 }
-
-struct SyncView: View {
-    @ObservedObject var viewModel: AppViewModel
-    @FocusState private var focusedField: SyncField?
-
-    private enum SyncField: Hashable {
-        case backendURL
-        case rebuildConfirmation
-    }
-
-    var body: some View {
-        Form {
-            Section("Backend") {
-                TextField("https://api.example.com", text: $viewModel.baseURLString)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.URL)
-                    .autocorrectionDisabled()
-                    .focused($focusedField, equals: .backendURL)
-                    .submitLabel(.done)
-                    .onSubmit {
-                        focusedField = nil
-                    }
-
-                Button("Check Connection") {
-                    focusedField = nil
-                    Task { await viewModel.loadMe() }
-                }
-            }
-
-            Section("Strava") {
-                if let athlete = viewModel.athlete {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("\(athlete.firstname) \(athlete.lastname)")
-                            .font(.headline)
-                        Text("Strava ID \(athlete.id)")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text("Not connected")
-                        .foregroundStyle(.secondary)
-                }
-
-                Button(viewModel.isAuthenticating ? "Connecting..." : "Connect Strava") {
-                    focusedField = nil
-                    Task { await viewModel.connectStrava() }
-                }
-                .disabled(viewModel.isBusy)
-
-                if viewModel.isWaitingForBrowserAuth {
-                    Button("Check Login") {
-                        focusedField = nil
-                        Task { await viewModel.checkBrowserLogin() }
-                    }
-                    .disabled(viewModel.isBusy)
-
-                    Text("Finish Strava login in the browser, then return here.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Section("Sync") {
-                DatePicker("Start", selection: $viewModel.startDate, displayedComponents: .date)
-                DatePicker("End", selection: $viewModel.endDate, displayedComponents: .date)
-
-                Button(viewModel.isSyncing ? "Syncing..." : "Sync from Strava") {
-                    focusedField = nil
-                    Task { await viewModel.sync() }
-                }
-                .disabled(!viewModel.isAuthorized || viewModel.isBusy)
-
-                if let summary = viewModel.syncSummary {
-                    LabeledContent("Total", value: "\(summary.total)")
-                    LabeledContent("New", value: "\(summary.new)")
-                    LabeledContent("Existing", value: "\(summary.existing)")
-                    LabeledContent("Processed", value: "\(summary.success)")
-                    LabeledContent("Failed", value: "\(summary.failed)")
-                }
-            }
-
-            Section("Library") {
-                Button("Refresh Activities") {
-                    focusedField = nil
-                    Task { await viewModel.loadActivities(reset: true) }
-                }
-                .disabled(!viewModel.isAuthorized || viewModel.isBusy)
-
-                LabeledContent("Stored activities", value: "\(viewModel.activityCount)")
-                LabeledContent("Loaded on device", value: "\(viewModel.activities.count)")
-            }
-
-            Section("Live Test") {
-                TextField("REBUILD", text: $viewModel.rebuildConfirmation)
-                    .textInputAutocapitalization(.characters)
-                    .autocorrectionDisabled()
-                    .focused($focusedField, equals: .rebuildConfirmation)
-                    .submitLabel(.done)
-                    .onSubmit {
-                        focusedField = nil
-                    }
-
-                Button(viewModel.isRebuildingDatabase ? "Rebuilding..." : "Rebuild DB and Sync") {
-                    focusedField = nil
-                    Task { await viewModel.rebuildDatabaseAndSync() }
-                }
-                .disabled(!viewModel.canRebuildDatabase)
-
-                if let storage = viewModel.rebuildStorage {
-                    LabeledContent("Activities", value: "\(storage.activities)")
-                    LabeledContent("Route geometries", value: "\(storage.activityGeometries)")
-                    LabeledContent("Sample rows", value: "\(storage.pointSamples)")
-                    LabeledContent("Activities with samples", value: "\(storage.activitiesWithPointSamples)")
-                    LabeledContent("Activities with geometry", value: "\(storage.activitiesWithGeometry)")
-                }
-            }
-
-            if !viewModel.logLines.isEmpty {
-                Section("Log") {
-                    ForEach(viewModel.logLines, id: \.self) { line in
-                        Text(line)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .scrollDismissesKeyboard(.interactively)
-        .background {
-            Color.clear
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    focusedField = nil
-                }
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("Done") {
-                    focusedField = nil
-                }
-            }
-        }
-    }
-}
-
 struct ActivitiesView: View {
     @ObservedObject var viewModel: AppViewModel
     @FocusState private var isSearchFocused: Bool
@@ -215,7 +124,7 @@ struct ActivitiesView: View {
                 ContentUnavailableView(
                     "Connect Strava",
                     systemImage: "figure.outdoor.cycle",
-                    description: Text("Use the Sync tab to connect to your local B11K backend.")
+                    description: Text("Use Settings to connect to B11K.")
                 )
             } else {
                 Section("Search") {
@@ -329,6 +238,7 @@ struct ActivityDetailView: View {
     @State private var isLoadingRoute = false
     @State private var paintMetric: RoutePaintMetric = .none
     @State private var chartMetric: RoutePaintMetric = .altitude
+    @State private var isShowingSegmentCreator = false
 
     var body: some View {
         Form {
@@ -378,6 +288,15 @@ struct ActivityDetailView: View {
             }
 
             if let routeSnapshot, routeSnapshot.source == "point_samples" {
+                Section("Segments") {
+                    Button {
+                        isShowingSegmentCreator = true
+                    } label: {
+                        Label("Create Segment", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+                    }
+                    .disabled(routeSnapshot.points.count < 2 || viewModel.isBusy)
+                }
+
                 Section("Sample Data") {
                     ForEach(RoutePaintMetric.chartMetrics) { metric in
                         LabeledContent(metric.title, value: "\(routeSnapshot.sampleCount(for: metric))")
@@ -456,6 +375,11 @@ struct ActivityDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task(id: activity.id) {
             await loadRoute()
+        }
+        .sheet(isPresented: $isShowingSegmentCreator) {
+            if let routeSnapshot {
+                SegmentCreateView(viewModel: viewModel, activity: activity, routeSnapshot: routeSnapshot)
+            }
         }
     }
 
@@ -777,7 +701,7 @@ extension Array {
 @MainActor
 final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
     @AppStorage("b11k.baseURL") var baseURLString = ""
-    @AppStorage("b11k.sessionToken") private var sessionToken = ""
+    @Published private var sessionToken = ""
 
     @Published var athlete: Athlete?
     @Published var activityCount = 0
@@ -786,16 +710,27 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     @Published var activityPage = 1
     @Published var hasMoreActivities = false
     @Published var syncSummary: SyncSummary?
+    @Published var segments: [SegmentSummary] = []
+    @Published var segmentSearch = ""
+    @Published var profile: ProfileSummary?
+    @Published var discoveredStatus: DiscoveredStatus?
+    @Published var discoveredMapSnapshot: DiscoveredMapSnapshot?
     @Published var logLines: [String] = []
     @Published var message = ""
     @Published var showingMessage = false
     @Published var isAuthenticating = false
     @Published var isSyncing = false
-    @Published var isRebuildingDatabase = false
     @Published var isLoadingActivities = false
+    @Published var isLoadingSegments = false
+    @Published var isLoadingSegmentEfforts = false
+    @Published var isLoadingSegmentEffortDetail = false
+    @Published var isLoadingDiscovered = false
+    @Published var isLoadingDiscoveredMap = false
+    @Published var isRebuildingDiscovered = false
+    @Published var isLoadingProfile = false
+    @Published var isLoggingOut = false
+    @Published var isMutatingSegment = false
     @Published var isWaitingForBrowserAuth = false
-    @Published var rebuildConfirmation = ""
-    @Published var rebuildStorage: RebuildStorage?
 
     @Published var startDate: Date = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
     @Published var endDate: Date = Date()
@@ -803,16 +738,26 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     private var pendingState: String?
     private var authSession: ASWebAuthenticationSession?
 
+    override init() {
+        let keychainToken = KeychainSessionStore.load()
+        let legacyToken = UserDefaults.standard.string(forKey: "b11k.sessionToken") ?? ""
+        super.init()
+
+        if !keychainToken.isEmpty {
+            sessionToken = keychainToken
+        } else if !legacyToken.isEmpty {
+            sessionToken = legacyToken
+            KeychainSessionStore.save(legacyToken)
+            UserDefaults.standard.removeObject(forKey: "b11k.sessionToken")
+        }
+    }
+
     var isAuthorized: Bool {
         !sessionToken.isEmpty
     }
 
     var isBusy: Bool {
-        isAuthenticating || isSyncing || isRebuildingDatabase || isLoadingActivities
-    }
-
-    var canRebuildDatabase: Bool {
-        isAuthorized && !isBusy && rebuildConfirmation.trimmingCharacters(in: .whitespacesAndNewlines) == "REBUILD"
+        isAuthenticating || isSyncing || isLoadingActivities || isLoadingSegments || isLoadingSegmentEfforts || isLoadingSegmentEffortDetail || isLoadingDiscovered || isLoadingDiscoveredMap || isRebuildingDiscovered || isLoadingProfile || isLoggingOut || isMutatingSegment
     }
 
     var activityStats: ActivityStats? {
@@ -855,7 +800,14 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
                 return
             }
 
-            if start.redirectURI.hasPrefix("http://") || start.redirectURI.hasPrefix("https://") {
+            if let redirectURL = URL(string: start.redirectURI),
+               let redirectScheme = redirectURL.scheme?.lowercased(),
+               let redirectHost = redirectURL.host,
+               redirectScheme == "http" || redirectScheme == "https" {
+                guard Self.isBackendSchemeAllowed(scheme: redirectScheme, host: redirectHost) else {
+                    show("Backend OAuth redirect must use HTTPS.")
+                    return
+                }
                 isWaitingForBrowserAuth = true
                 _ = await UIApplication.shared.open(webURL)
                 return
@@ -906,11 +858,12 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
                 method: "POST",
                 body: body
             )
-            sessionToken = response.sessionToken
+            setSessionToken(response.sessionToken)
             athlete = response.athlete
             pendingState = nil
             isWaitingForBrowserAuth = false
             logLines.insert("Connected to Strava.", at: 0)
+            profile = nil
             await loadActivities(reset: true)
         } catch {
             show(error.localizedDescription)
@@ -948,11 +901,12 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
                     show("Backend returned an incomplete session.")
                     return
                 }
-                sessionToken = token
+                setSessionToken(token)
                 self.athlete = athlete
                 isWaitingForBrowserAuth = false
                 self.pendingState = nil
                 logLines.insert("Connected to Strava.", at: 0)
+                profile = nil
                 await loadActivities(reset: true)
             default:
                 show("Unexpected login status: \(response.status)")
@@ -1004,45 +958,10 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
             let response: SyncResponse = try await request(url, method: "POST", authorized: true)
             syncSummary = response.summary
             logLines = response.logs.isEmpty ? ["Sync complete."] : response.logs
+            profile = nil
             await loadActivities(reset: true)
-        } catch {
-            handleRequestError(error)
-        }
-    }
-
-    func rebuildDatabaseAndSync() async {
-        guard let baseURL else {
-            show("Enter a valid backend URL.")
-            return
-        }
-        guard rebuildConfirmation.trimmingCharacters(in: .whitespacesAndNewlines) == "REBUILD" else {
-            show("Type REBUILD before running the live test.")
-            return
-        }
-
-        isRebuildingDatabase = true
-        syncSummary = nil
-        rebuildStorage = nil
-        logLines = ["Rebuild test started..."]
-        defer { isRebuildingDatabase = false }
-
-        do {
-            var components = URLComponents(url: baseURL.appending(path: "/api/mobile/dev/rebuild-sync"), resolvingAgainstBaseURL: false)
-            components?.queryItems = [
-                URLQueryItem(name: "start", value: Self.dateFormatter.string(from: startDate)),
-                URLQueryItem(name: "end", value: Self.dateFormatter.string(from: endDate))
-            ]
-            guard let url = components?.url else {
-                show("Could not build rebuild URL.")
-                return
-            }
-            let body = RebuildSyncRequest(confirmation: "REBUILD")
-            let response: RebuildSyncResponse = try await request(url, method: "POST", body: body, authorized: true)
-            syncSummary = response.summary
-            rebuildStorage = response.storage
-            logLines = response.logs.isEmpty ? ["Rebuild test complete."] : response.logs
-            rebuildConfirmation = ""
-            await loadActivities(reset: true)
+            await loadSegments()
+            await loadDiscoveredStatus()
         } catch {
             handleRequestError(error)
         }
@@ -1103,19 +1022,338 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
         }
     }
 
+    func loadSegments() async {
+        guard isAuthorized else { return }
+        isLoadingSegments = true
+        defer { isLoadingSegments = false }
+
+        do {
+            var queryItems: [URLQueryItem] = []
+            let trimmedSearch = segmentSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedSearch.isEmpty {
+                queryItems.append(URLQueryItem(name: "q", value: trimmedSearch))
+            }
+            guard let url = mobileURL(path: "/api/mobile/segments", queryItems: queryItems) else {
+                show("Could not build segments URL.")
+                return
+            }
+            let response: SegmentsResponse = try await request(url, authorized: true)
+            segments = response.segments
+        } catch {
+            handleRequestError(error)
+        }
+    }
+
+    func loadSegment(id: Int64) async -> SegmentDetail? {
+        guard isAuthorized else { return nil }
+        do {
+            guard let url = mobileURL(path: "/api/mobile/segments/\(id)") else {
+                return nil
+            }
+            let response: SegmentDetailResponse = try await request(url, authorized: true)
+            return response.segment
+        } catch {
+            if case AppError.http(let statusCode, _) = error, statusCode == 401 {
+                handleRequestError(error)
+            }
+            return nil
+        }
+    }
+
+    func loadSegmentEfforts(segmentID: Int64, tolerance: Double, sort: SegmentEffortSort, refresh: Bool = false) async -> SegmentEffortsResponse? {
+        guard isAuthorized else { return nil }
+        isLoadingSegmentEfforts = true
+        defer { isLoadingSegmentEfforts = false }
+
+        do {
+            var queryItems = [
+                URLQueryItem(name: "tolerance", value: Self.queryNumber(tolerance)),
+                URLQueryItem(name: "sort", value: sort.rawValue)
+            ]
+            if refresh {
+                queryItems.append(URLQueryItem(name: "refresh", value: "true"))
+            }
+            guard let url = mobileURL(path: "/api/mobile/segments/\(segmentID)/activities", queryItems: queryItems) else {
+                show("Could not build segment efforts URL.")
+                return nil
+            }
+            return try await request(url, authorized: true)
+        } catch {
+            handleRequestError(error)
+            return nil
+        }
+    }
+
+    func loadSegmentEffortDetail(segmentID: Int64, activityID: Int64, tolerance: Double) async -> SegmentEffortDetail? {
+        guard isAuthorized else { return nil }
+        isLoadingSegmentEffortDetail = true
+        defer { isLoadingSegmentEffortDetail = false }
+
+        do {
+            let queryItems = [URLQueryItem(name: "tolerance", value: Self.queryNumber(tolerance))]
+            guard let url = mobileURL(path: "/api/mobile/segments/\(segmentID)/activities/\(activityID)", queryItems: queryItems) else {
+                show("Could not build segment effort URL.")
+                return nil
+            }
+            return try await request(url, authorized: true)
+        } catch {
+            handleRequestError(error)
+            return nil
+        }
+    }
+
+    func createSegment(activityID: Int64, name: String, description: String, startIndex: Int, endIndex: Int) async -> SegmentDetail? {
+        guard isAuthorized else { return nil }
+        isMutatingSegment = true
+        defer { isMutatingSegment = false }
+
+        do {
+            guard let url = mobileURL(path: "/api/mobile/segments") else {
+                show("Could not build segment URL.")
+                return nil
+            }
+            let body = SegmentCreateRequest(
+                name: name,
+                description: description,
+                activityID: activityID,
+                startIndex: startIndex,
+                endIndex: endIndex
+            )
+            let response: SegmentDetailResponse = try await request(url, method: "POST", body: body, authorized: true)
+            await loadSegments()
+            show("Segment created.")
+            return response.segment
+        } catch {
+            handleRequestError(error)
+            return nil
+        }
+    }
+
+    func updateSegment(id: Int64, name: String, description: String) async -> SegmentDetail? {
+        guard isAuthorized else { return nil }
+        isMutatingSegment = true
+        defer { isMutatingSegment = false }
+
+        do {
+            guard let url = mobileURL(path: "/api/mobile/segments/\(id)") else {
+                show("Could not build segment URL.")
+                return nil
+            }
+            let body = SegmentUpdateRequest(name: name, description: description)
+            let response: SegmentDetailResponse = try await request(url, method: "PATCH", body: body, authorized: true)
+            await loadSegments()
+            show("Segment updated.")
+            return response.segment
+        } catch {
+            handleRequestError(error)
+            return nil
+        }
+    }
+
+    func deleteSegment(id: Int64) async -> Bool {
+        guard isAuthorized else { return false }
+        isMutatingSegment = true
+        defer { isMutatingSegment = false }
+
+        do {
+            guard let url = mobileURL(path: "/api/mobile/segments/\(id)") else {
+                show("Could not build segment URL.")
+                return false
+            }
+            _ = try await requestData(url, method: "DELETE", authorized: true)
+            segments.removeAll { $0.id == id }
+            show("Segment deleted.")
+            return true
+        } catch {
+            handleRequestError(error)
+            return false
+        }
+    }
+
+    func loadProfile() async {
+        guard isAuthorized else { return }
+        isLoadingProfile = true
+        defer { isLoadingProfile = false }
+
+        do {
+            guard let url = mobileURL(path: "/api/mobile/profile") else {
+                show("Could not build profile URL.")
+                return
+            }
+            let profile: ProfileSummary = try await request(url, authorized: true)
+            self.profile = profile
+            if let athlete = profile.athlete {
+                self.athlete = athlete
+            }
+        } catch {
+            handleRequestError(error)
+        }
+    }
+
+    func logout() async {
+        guard isAuthorized else {
+            clearSession()
+            return
+        }
+        isLoggingOut = true
+        defer { isLoggingOut = false }
+
+        do {
+            guard let url = mobileURL(path: "/api/mobile/logout") else {
+                show("Could not build logout URL.")
+                return
+            }
+            let _: LogoutResponse = try await request(url, method: "POST", authorized: true)
+            clearSession()
+            show("Logged out.")
+        } catch {
+            if case AppError.http(let statusCode, _) = error, statusCode == 401 {
+                clearSession()
+                show("Logged out.")
+                return
+            }
+            handleRequestError(error)
+        }
+    }
+
+    func loadDiscoveredStatus() async {
+        guard isAuthorized else { return }
+        isLoadingDiscovered = true
+        defer { isLoadingDiscovered = false }
+
+        do {
+            guard let url = mobileURL(path: "/api/mobile/discovered/status") else {
+                show("Could not build discovered URL.")
+                return
+            }
+            let status: DiscoveredStatus = try await request(url, authorized: true)
+            if discoveredMapSnapshot?.sourceBBox != status.bbox {
+                discoveredMapSnapshot = nil
+            }
+            discoveredStatus = status
+        } catch {
+            handleRequestError(error)
+        }
+    }
+
+    func rebuildDiscoveredCoverage() async {
+        guard isAuthorized else { return }
+        isRebuildingDiscovered = true
+        defer { isRebuildingDiscovered = false }
+
+        do {
+            guard let url = mobileURL(path: "/api/mobile/discovered/rebuild") else {
+                show("Could not build rebuild URL.")
+                return
+            }
+            let status: DiscoveredStatus = try await request(url, method: "POST", authorized: true)
+            discoveredStatus = status
+            discoveredMapSnapshot = nil
+            await loadDiscoveredMap()
+        } catch {
+            handleRequestError(error)
+        }
+    }
+
+    func loadDiscoveredMap() async {
+        guard isAuthorized else { return }
+        if discoveredStatus == nil {
+            await loadDiscoveredStatus()
+        }
+        guard let status = discoveredStatus else { return }
+        guard let requestBBox = Self.discoveredRequestBBox(from: status.bbox) else {
+            discoveredMapSnapshot = nil
+            return
+        }
+
+        isLoadingDiscoveredMap = true
+        defer { isLoadingDiscoveredMap = false }
+
+        do {
+            let bbox = Self.bboxQueryValue(requestBBox)
+            let queryItems = [URLQueryItem(name: "bbox", value: bbox)]
+            guard let fogURL = mobileURL(path: "/api/mobile/discovered/fog", queryItems: queryItems),
+                  let coverageURL = mobileURL(path: "/api/mobile/discovered/coverage", queryItems: queryItems) else {
+                show("Could not build discovered map URL.")
+                return
+            }
+            let fogGeoJSON = try await requestData(fogURL, authorized: true)
+            let coverageGeoJSON = try await requestData(coverageURL, authorized: true)
+            discoveredMapSnapshot = DiscoveredMapSnapshot(
+                sourceBBox: status.bbox,
+                requestBBox: requestBBox,
+                fogGeoJSON: fogGeoJSON,
+                coverageGeoJSON: coverageGeoJSON
+            )
+        } catch {
+            handleRequestError(error)
+        }
+    }
+
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        let keyWindow = UIApplication.shared.connectedScenes
+        let windowScenes = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
+        let keyWindow = windowScenes
             .flatMap(\.windows)
             .first(where: { $0.isKeyWindow })
         if let keyWindow {
             return keyWindow
         }
-        return ASPresentationAnchor(frame: .zero)
+        guard let windowScene = windowScenes.first else {
+            preconditionFailure("No window scene available for authentication presentation.")
+        }
+        return ASPresentationAnchor(windowScene: windowScene)
     }
 
     private var baseURL: URL? {
-        URL(string: baseURLString.trimmingCharacters(in: .whitespacesAndNewlines))
+        let rawValue = baseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawValue.isEmpty,
+              var components = URLComponents(string: rawValue),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host,
+              !host.isEmpty,
+              Self.isBackendSchemeAllowed(scheme: scheme, host: host) else {
+            return nil
+        }
+        components.scheme = scheme
+        return components.url
+    }
+
+    private static func isBackendSchemeAllowed(scheme: String, host: String) -> Bool {
+        if scheme == "https" {
+            return true
+        }
+
+        #if DEBUG
+        if scheme == "http" && isLocalOrPrivateHost(host) {
+            return true
+        }
+        #endif
+
+        return false
+    }
+
+    private static func isLocalOrPrivateHost(_ host: String) -> Bool {
+        let normalized = host
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
+
+        if normalized == "localhost" || normalized.hasSuffix(".localhost") || normalized.hasSuffix(".local") {
+            return true
+        }
+        if normalized == "::1" || normalized.hasPrefix("fe80:") || normalized.hasPrefix("fc") || normalized.hasPrefix("fd") {
+            return true
+        }
+
+        let parts = normalized.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else {
+            return false
+        }
+        return parts[0] == 10 ||
+            parts[0] == 127 ||
+            (parts[0] == 172 && (16...31).contains(parts[1])) ||
+            (parts[0] == 169 && parts[1] == 254) ||
+            (parts[0] == 192 && parts[1] == 168)
     }
 
     private func mobileURL(path: String, queryItems: [URLQueryItem] = []) -> URL? {
@@ -1145,16 +1383,24 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     }
 
     private func clearSession() {
-        sessionToken = ""
+        setSessionToken("")
         athlete = nil
         activityCount = 0
         activities = []
+        segments = []
+        profile = nil
+        discoveredStatus = nil
+        discoveredMapSnapshot = nil
         activityPage = 1
         hasMoreActivities = false
         syncSummary = nil
-        rebuildStorage = nil
         isWaitingForBrowserAuth = false
         pendingState = nil
+    }
+
+    private func setSessionToken(_ token: String) {
+        sessionToken = token
+        KeychainSessionStore.save(token)
     }
 
     private func request<Response: Decodable>(
@@ -1181,6 +1427,16 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
         bodyData: Data?,
         authorized: Bool
     ) async throws -> Response {
+        let data = try await requestData(url, method: method, bodyData: bodyData, authorized: authorized)
+        return try JSONDecoder.b11k.decode(Response.self, from: data)
+    }
+
+    private func requestData(
+        _ url: URL,
+        method: String = "GET",
+        bodyData: Data? = nil,
+        authorized: Bool = false
+    ) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 600
@@ -1189,6 +1445,11 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         if authorized {
+            guard let scheme = url.scheme?.lowercased(),
+                  let host = url.host,
+                  Self.isBackendSchemeAllowed(scheme: scheme, host: host) else {
+                throw AppError.message("Use an HTTPS backend URL before sending an authenticated request.")
+            }
             request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
         }
 
@@ -1200,7 +1461,38 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
             let text = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
             throw AppError.http(http.statusCode, text.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        return try JSONDecoder.b11k.decode(Response.self, from: data)
+        return data
+    }
+
+    private static func discoveredRequestBBox(from bbox: [Double]?) -> [Double]? {
+        guard let bbox, bbox.count == 4 else { return nil }
+        let minLng = bbox[0]
+        let minLat = bbox[1]
+        let maxLng = bbox[2]
+        let maxLat = bbox[3]
+        guard minLng.isFinite, minLat.isFinite, maxLng.isFinite, maxLat.isFinite else { return nil }
+        guard minLng >= -180, maxLng <= 180, minLat >= -90, maxLat <= 90, minLng <= maxLng, minLat <= maxLat else {
+            return nil
+        }
+
+        let lngPad = max((maxLng - minLng) * 0.15, 0.01)
+        let latPad = max((maxLat - minLat) * 0.15, 0.01)
+        return [
+            max(-180, minLng - lngPad),
+            max(-90, minLat - latPad),
+            min(180, maxLng + lngPad),
+            min(90, maxLat + latPad)
+        ]
+    }
+
+    private static func bboxQueryValue(_ bbox: [Double]) -> String {
+        bbox.map { value in
+            String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), arguments: [value])
+        }.joined(separator: ",")
+    }
+
+    private static func queryNumber(_ value: Double) -> String {
+        String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), arguments: [value])
     }
 
     private static let dateFormatter: DateFormatter = {
@@ -1256,6 +1548,14 @@ struct AuthSessionResponse: Decodable {
     }
 }
 
+struct LogoutResponse: Decodable {
+    let loggedOut: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case loggedOut = "logged_out"
+    }
+}
+
 struct MeResponse: Decodable {
     let athlete: Athlete
 }
@@ -1304,6 +1604,483 @@ struct ActivityRouteResponse: Decodable {
         activityID = try container.decodeIfPresent(Int64.self, forKey: .activityID) ?? 0
         count = try container.decodeIfPresent(Int.self, forKey: .count) ?? points.count
         source = try container.decodeIfPresent(String.self, forKey: .source) ?? "unknown"
+    }
+}
+
+struct ProfileSummary: Decodable {
+    let athlete: Athlete?
+    let hrZones: [ProfileHRZone]
+    let hrZonesError: String
+    let totalBikeKM: Double
+    let totalActivities: Int
+    let bikeStats: [ProfileBikeStat]
+    let bestMonth: ProfilePeriodStat
+    let bestYear: ProfilePeriodStat
+    let hasRecordedRides: Bool
+    let hasRecordedMonths: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case athlete
+        case hrZones = "hr_zones"
+        case hrZonesError = "hr_zones_error"
+        case totalBikeKM = "total_bike_km"
+        case totalActivities = "total_activities"
+        case bikeStats = "bike_stats"
+        case bestMonth = "best_month"
+        case bestYear = "best_year"
+        case hasRecordedRides = "has_recorded_rides"
+        case hasRecordedMonths = "has_recorded_months"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        athlete = try container.decodeIfPresent(Athlete.self, forKey: .athlete)
+        hrZones = try container.decodeIfPresent([ProfileHRZone].self, forKey: .hrZones) ?? []
+        hrZonesError = try container.decodeIfPresent(String.self, forKey: .hrZonesError) ?? ""
+        totalBikeKM = try container.decodeIfPresent(Double.self, forKey: .totalBikeKM) ?? 0
+        totalActivities = try container.decodeIfPresent(Int.self, forKey: .totalActivities) ?? 0
+        bikeStats = try container.decodeIfPresent([ProfileBikeStat].self, forKey: .bikeStats) ?? []
+        bestMonth = try container.decodeIfPresent(ProfilePeriodStat.self, forKey: .bestMonth) ?? ProfilePeriodStat.empty
+        bestYear = try container.decodeIfPresent(ProfilePeriodStat.self, forKey: .bestYear) ?? ProfilePeriodStat.empty
+        hasRecordedRides = try container.decodeIfPresent(Bool.self, forKey: .hasRecordedRides) ?? !bikeStats.isEmpty
+        hasRecordedMonths = try container.decodeIfPresent(Bool.self, forKey: .hasRecordedMonths) ?? !bestMonth.label.isEmpty || !bestYear.label.isEmpty
+    }
+}
+
+struct ProfileBikeStat: Decodable, Identifiable {
+    let gearID: String
+    let label: String
+    let distanceKM: Double
+    let activities: Int
+
+    var id: String { gearID }
+
+    enum CodingKeys: String, CodingKey {
+        case gearID = "gear_id"
+        case label
+        case distanceKM = "distance_km"
+        case activities
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        gearID = try container.decodeIfPresent(String.self, forKey: .gearID) ?? UUID().uuidString
+        label = try container.decodeIfPresent(String.self, forKey: .label) ?? "Unknown Bike"
+        distanceKM = try container.decodeIfPresent(Double.self, forKey: .distanceKM) ?? 0
+        activities = try container.decodeIfPresent(Int.self, forKey: .activities) ?? 0
+    }
+}
+
+struct ProfilePeriodStat: Decodable {
+    static let empty = ProfilePeriodStat(label: "", activities: 0)
+
+    let label: String
+    let activities: Int
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case activities
+    }
+
+    init(label: String, activities: Int) {
+        self.label = label
+        self.activities = activities
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try container.decodeIfPresent(String.self, forKey: .label) ?? ""
+        activities = try container.decodeIfPresent(Int.self, forKey: .activities) ?? 0
+    }
+}
+
+struct ProfileHRZone: Decodable, Identifiable {
+    let label: String
+    let range: String
+
+    var id: String { "\(label)-\(range)" }
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case range
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try container.decodeIfPresent(String.self, forKey: .label) ?? "Zone"
+        range = try container.decodeIfPresent(String.self, forKey: .range) ?? "not set"
+    }
+}
+
+struct SegmentsResponse: Decodable {
+    let count: Int
+    let segments: [SegmentSummary]
+
+    enum CodingKeys: String, CodingKey {
+        case count
+        case segments
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        segments = try container.decodeIfPresent([SegmentSummary].self, forKey: .segments) ?? []
+        count = try container.decodeIfPresent(Int.self, forKey: .count) ?? segments.count
+    }
+}
+
+struct SegmentCreateRequest: Encodable {
+    let name: String
+    let description: String
+    let activityID: Int64
+    let startIndex: Int
+    let endIndex: Int
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case description
+        case activityID = "activity_id"
+        case startIndex = "start_index"
+        case endIndex = "end_index"
+    }
+}
+
+struct SegmentUpdateRequest: Encodable {
+    let name: String
+    let description: String
+}
+
+struct SegmentDetailResponse: Decodable {
+    let segment: SegmentDetail
+}
+
+enum SegmentEffortSort: String, CaseIterable, Identifiable {
+    case totalTime = "total_time"
+    case date
+    case distance
+    case avgHR = "avg_hr"
+    case avgSpeed = "avg_speed"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .totalTime:
+            return "Best Time"
+        case .date:
+            return "Latest"
+        case .distance:
+            return "Best Match"
+        case .avgHR:
+            return "Avg HR"
+        case .avgSpeed:
+            return "Avg Speed"
+        }
+    }
+}
+
+struct SegmentEffortsResponse: Decodable {
+    let segmentID: Int64
+    let count: Int
+    let tolerance: Double
+    let sort: String
+    let activities: [SegmentEffort]
+
+    enum CodingKeys: String, CodingKey {
+        case segmentID = "segment_id"
+        case count
+        case tolerance
+        case sort
+        case activities
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        activities = try container.decodeIfPresent([SegmentEffort].self, forKey: .activities) ?? []
+        segmentID = try container.decodeIfPresent(Int64.self, forKey: .segmentID) ?? 0
+        count = try container.decodeIfPresent(Int.self, forKey: .count) ?? activities.count
+        tolerance = try container.decodeIfPresent(Double.self, forKey: .tolerance) ?? 15
+        sort = try container.decodeIfPresent(String.self, forKey: .sort) ?? SegmentEffortSort.totalTime.rawValue
+    }
+}
+
+struct SegmentEffortDetail: Decodable {
+    let segmentID: Int64
+    let activityID: Int64
+    let tolerance: Double
+    let startIndex: Int
+    let endIndex: Int
+    let activity: Activity
+    let metrics: SegmentEffortMetrics
+    let points: [RoutePoint]
+
+    enum CodingKeys: String, CodingKey {
+        case segmentID = "segment_id"
+        case activityID = "activity_id"
+        case tolerance
+        case startIndex = "start_index"
+        case endIndex = "end_index"
+        case activity
+        case metrics
+        case points
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        segmentID = try container.decodeIfPresent(Int64.self, forKey: .segmentID) ?? 0
+        activityID = try container.decodeIfPresent(Int64.self, forKey: .activityID) ?? 0
+        tolerance = try container.decodeIfPresent(Double.self, forKey: .tolerance) ?? 15
+        startIndex = try container.decodeIfPresent(Int.self, forKey: .startIndex) ?? 0
+        endIndex = try container.decodeIfPresent(Int.self, forKey: .endIndex) ?? 0
+        activity = try container.decode(Activity.self, forKey: .activity)
+        metrics = try container.decodeIfPresent(SegmentEffortMetrics.self, forKey: .metrics) ?? SegmentEffortMetrics.empty
+        points = try container.decodeIfPresent([RoutePoint].self, forKey: .points) ?? []
+    }
+}
+
+struct SegmentEffortMetrics: Decodable {
+    static let empty = SegmentEffortMetrics(avgHR: 0, avgSpeed: 0, distance: 0, elevationGain: 0, elapsedSeconds: 0)
+
+    let avgHR: Double
+    let avgSpeed: Double
+    let distance: Double
+    let elevationGain: Double
+    let elapsedSeconds: Double
+
+    enum CodingKeys: String, CodingKey {
+        case avgHR = "avg_hr"
+        case avgSpeed = "avg_speed"
+        case distance
+        case elevationGain = "elevation_gain"
+        case elapsedSeconds = "elapsed_seconds"
+    }
+
+    init(avgHR: Double, avgSpeed: Double, distance: Double, elevationGain: Double, elapsedSeconds: Double) {
+        self.avgHR = avgHR
+        self.avgSpeed = avgSpeed
+        self.distance = distance
+        self.elevationGain = elevationGain
+        self.elapsedSeconds = elapsedSeconds
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        avgHR = try container.decodeIfPresent(Double.self, forKey: .avgHR) ?? 0
+        avgSpeed = try container.decodeIfPresent(Double.self, forKey: .avgSpeed) ?? 0
+        distance = try container.decodeIfPresent(Double.self, forKey: .distance) ?? 0
+        elevationGain = try container.decodeIfPresent(Double.self, forKey: .elevationGain) ?? 0
+        elapsedSeconds = try container.decodeIfPresent(Double.self, forKey: .elapsedSeconds) ?? 0
+    }
+}
+
+struct SegmentEffort: Decodable, Identifiable {
+    let activity: Activity
+    let minDistanceM: Double
+    let overlapLengthM: Double
+    let overlapPercentage: Double
+    let segmentAvgHR: Double?
+    let segmentAvgSpeed: Double?
+    let segmentDistance: Double?
+    let segmentElevation: Double?
+    let segmentElapsedSecs: Double?
+
+    var id: Int64 { activity.id }
+
+    enum CodingKeys: String, CodingKey {
+        case activity
+        case minDistanceM = "min_distance_m"
+        case overlapLengthM = "overlap_length_m"
+        case overlapPercentage = "overlap_percentage"
+        case segmentAvgHR = "segment_avg_hr"
+        case segmentAvgSpeed = "segment_avg_speed"
+        case segmentDistance = "segment_distance"
+        case segmentElevation = "segment_elevation_gain"
+        case segmentElapsedSecs = "segment_elapsed_seconds"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        activity = try container.decode(Activity.self, forKey: .activity)
+        minDistanceM = try container.decodeIfPresent(Double.self, forKey: .minDistanceM) ?? 0
+        overlapLengthM = try container.decodeIfPresent(Double.self, forKey: .overlapLengthM) ?? 0
+        overlapPercentage = try container.decodeIfPresent(Double.self, forKey: .overlapPercentage) ?? 0
+        segmentAvgHR = try container.decodeIfPresent(Double.self, forKey: .segmentAvgHR)
+        segmentAvgSpeed = try container.decodeIfPresent(Double.self, forKey: .segmentAvgSpeed)
+        segmentDistance = try container.decodeIfPresent(Double.self, forKey: .segmentDistance)
+        segmentElevation = try container.decodeIfPresent(Double.self, forKey: .segmentElevation)
+        segmentElapsedSecs = try container.decodeIfPresent(Double.self, forKey: .segmentElapsedSecs)
+    }
+}
+
+struct SegmentSummary: Decodable, Identifiable {
+    let id: Int64
+    let name: String
+    let description: String?
+    let createdAt: String
+    let distanceLabel: String
+    let netRiseLabel: String
+    let ascentLabel: String
+    let slopeLabel: String
+    let direction: String
+    let directionKey: String
+    let attempts: Int
+    let minTimeLabel: String
+    let maxTimeLabel: String
+    let minHRLabel: String
+    let maxHRLabel: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case description
+        case createdAt = "created_at"
+        case distanceLabel = "distance_label"
+        case netRiseLabel = "net_rise_label"
+        case ascentLabel = "ascent_label"
+        case slopeLabel = "slope_label"
+        case direction
+        case directionKey = "direction_key"
+        case attempts
+        case minTimeLabel = "min_time_label"
+        case maxTimeLabel = "max_time_label"
+        case minHRLabel = "min_hr_label"
+        case maxHRLabel = "max_hr_label"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(Int64.self, forKey: .id) ?? 0
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? "Untitled Segment"
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
+        distanceLabel = try container.decodeIfPresent(String.self, forKey: .distanceLabel) ?? "n/a"
+        netRiseLabel = try container.decodeIfPresent(String.self, forKey: .netRiseLabel) ?? "n/a"
+        ascentLabel = try container.decodeIfPresent(String.self, forKey: .ascentLabel) ?? "n/a"
+        slopeLabel = try container.decodeIfPresent(String.self, forKey: .slopeLabel) ?? "n/a"
+        direction = try container.decodeIfPresent(String.self, forKey: .direction) ?? "Unknown"
+        directionKey = try container.decodeIfPresent(String.self, forKey: .directionKey) ?? "unknown"
+        attempts = try container.decodeIfPresent(Int.self, forKey: .attempts) ?? 0
+        minTimeLabel = try container.decodeIfPresent(String.self, forKey: .minTimeLabel) ?? "n/a"
+        maxTimeLabel = try container.decodeIfPresent(String.self, forKey: .maxTimeLabel) ?? "n/a"
+        minHRLabel = try container.decodeIfPresent(String.self, forKey: .minHRLabel) ?? "n/a"
+        maxHRLabel = try container.decodeIfPresent(String.self, forKey: .maxHRLabel) ?? "n/a"
+    }
+}
+
+struct SegmentDetail: Decodable, Identifiable {
+    let id: Int64
+    let name: String
+    let description: String?
+    let createdAt: String
+    let updatedAt: String
+    let distanceMeters: Double?
+    let elevationGainM: Double?
+    let elevationLossM: Double?
+    let netElevationM: Double?
+    let slopePercent: Double?
+    let direction: String
+    let directionKey: String
+    let geometry: SegmentGeometry?
+
+    var routePoints: [RoutePoint] {
+        geometry?.points.enumerated().map { index, point in
+            RoutePoint(index: index, lat: point.lat, lng: point.lng)
+        } ?? []
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case description
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case distanceMeters = "distance_meters"
+        case elevationGainM = "elevation_gain_m"
+        case elevationLossM = "elevation_loss_m"
+        case netElevationM = "net_elevation_m"
+        case slopePercent = "slope_percent"
+        case direction
+        case directionKey = "direction_key"
+        case geometry
+    }
+}
+
+struct SegmentGeometry: Decodable {
+    let type: String
+    let coordinates: [[Double]]
+    let points: [SegmentPoint]
+}
+
+struct SegmentPoint: Decodable {
+    let lat: Double
+    let lng: Double
+}
+
+struct DiscoveredStatus: Decodable {
+    let athleteID: Int64
+    let enabled: Bool
+    let stale: Bool
+    let buildableActivities: Int
+    let cachedActivities: Int
+    let radiusMeters: Double
+    let sampleDistanceMeters: Double
+    let rebuiltAt: Date?
+    let bbox: [Double]?
+    let message: String?
+
+    var statusLabel: String {
+        if !enabled {
+            return "Disabled"
+        }
+        return stale ? "Stale" : "Current"
+    }
+
+    var mapCacheKey: String {
+        let bboxKey = bbox?.map { Formatters.coordinate($0) }.joined(separator: ",") ?? "none"
+        let rebuiltKey = rebuiltAt.map { String($0.timeIntervalSince1970) } ?? "never"
+        return "\(bboxKey)-\(rebuiltKey)-\(stale)-\(cachedActivities)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case athleteID = "athlete_id"
+        case enabled
+        case stale
+        case buildableActivities = "buildable_activities"
+        case cachedActivities = "cached_activities"
+        case radiusMeters = "radius_meters"
+        case sampleDistanceMeters = "sample_distance_meters"
+        case rebuiltAt = "rebuilt_at"
+        case bbox
+        case message
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        athleteID = try container.decodeIfPresent(Int64.self, forKey: .athleteID) ?? 0
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        stale = try container.decodeIfPresent(Bool.self, forKey: .stale) ?? true
+        buildableActivities = try container.decodeIfPresent(Int.self, forKey: .buildableActivities) ?? 0
+        cachedActivities = try container.decodeIfPresent(Int.self, forKey: .cachedActivities) ?? 0
+        radiusMeters = try container.decodeIfPresent(Double.self, forKey: .radiusMeters) ?? 0
+        sampleDistanceMeters = try container.decodeIfPresent(Double.self, forKey: .sampleDistanceMeters) ?? 0
+        if let rebuiltAtString = try container.decodeIfPresent(String.self, forKey: .rebuiltAt) {
+            rebuiltAt = Formatters.isoDate(from: rebuiltAtString)
+        } else {
+            rebuiltAt = nil
+        }
+        bbox = try container.decodeIfPresent([Double].self, forKey: .bbox)
+        message = try container.decodeIfPresent(String.self, forKey: .message)
+    }
+}
+
+struct DiscoveredMapSnapshot {
+    let sourceBBox: [Double]?
+    let requestBBox: [Double]
+    let fogGeoJSON: Data
+    let coverageGeoJSON: Data
+
+    var renderKey: String {
+        let bboxKey = requestBBox.map { Formatters.coordinate($0) }.joined(separator: ",")
+        return "\(bboxKey)-\(fogGeoJSON.count)-\(coverageGeoJSON.count)"
     }
 }
 
@@ -1396,6 +2173,32 @@ struct RoutePoint: Decodable, Identifiable {
         case grade
         case moving
         case cumulativeDistance = "cumulative_distance"
+    }
+
+    init(
+        index: Int,
+        lat: Double,
+        lng: Double,
+        altitude: Double? = nil,
+        heartrate: Int? = nil,
+        speed: Double? = nil,
+        watts: Int? = nil,
+        cadence: Int? = nil,
+        grade: Double? = nil,
+        moving: Bool? = nil,
+        cumulativeDistance: Double? = nil
+    ) {
+        self.index = index
+        self.lat = lat
+        self.lng = lng
+        self.altitude = altitude
+        self.heartrate = heartrate
+        self.speed = speed
+        self.watts = watts
+        self.cadence = cadence
+        self.grade = grade
+        self.moving = moving
+        self.cumulativeDistance = cumulativeDistance
     }
 
     init(from decoder: Decoder) throws {
@@ -1631,41 +2434,18 @@ struct SyncSummary: Decodable {
     let failed: Int
 }
 
-struct RebuildSyncRequest: Encodable {
-    let confirmation: String
-}
-
-struct RebuildSyncResponse: Decodable {
-    let summary: SyncSummary
-    let logs: [String]
-    let storage: RebuildStorage
-}
-
-struct RebuildStorage: Decodable {
-    let activities: Int
-    let activityGeometries: Int
-    let pointSamples: Int
-    let activitiesWithPointSamples: Int
-    let activitiesWithGeometry: Int
-
-    enum CodingKeys: String, CodingKey {
-        case activities
-        case activityGeometries = "activity_geometries"
-        case pointSamples = "point_samples"
-        case activitiesWithPointSamples = "activities_with_point_samples"
-        case activitiesWithGeometry = "activities_with_geometry"
-    }
-}
 
 struct Athlete: Decodable {
     let id: Int64
     let firstname: String
     let lastname: String
+    let profile: String
 
     enum CodingKeys: String, CodingKey {
         case id
         case firstname
         case lastname
+        case profile
     }
 
     init(from decoder: Decoder) throws {
@@ -1673,6 +2453,7 @@ struct Athlete: Decodable {
         id = try container.decodeIfPresent(Int64.self, forKey: .id) ?? 0
         firstname = try container.decodeIfPresent(String.self, forKey: .firstname) ?? ""
         lastname = try container.decodeIfPresent(String.self, forKey: .lastname) ?? ""
+        profile = try container.decodeIfPresent(String.self, forKey: .profile) ?? ""
     }
 }
 
@@ -1715,6 +2496,11 @@ enum Formatters {
         "\(wholeNumber(meters)) m"
     }
 
+    static func signedElevation(_ meters: Double) -> String {
+        let prefix = meters > 0 ? "+" : ""
+        return "\(prefix)\(wholeNumber(meters)) m"
+    }
+
     static func speed(_ metersPerSecond: Double) -> String {
         let kmh = metersPerSecond * 3.6
         return "\(number(kmh)) km/h"
@@ -1736,6 +2522,10 @@ enum Formatters {
 
     static func wholeNumber(_ value: Double) -> String {
         integer.string(from: NSNumber(value: value)) ?? "\(Int(value))"
+    }
+
+    static func coordinate(_ value: Double) -> String {
+        coordinateFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
     private static let shortDate: DateFormatter = {
@@ -1762,6 +2552,13 @@ enum Formatters {
     private static let integer: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.maximumFractionDigits = 0
+        return formatter
+    }()
+
+    private static let coordinateFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.maximumFractionDigits = 5
+        formatter.minimumFractionDigits = 0
         return formatter
     }()
 }

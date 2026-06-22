@@ -23,13 +23,18 @@ go.work.sum
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 *.xcuserstate
 xcuserdata/
+**/xcuserdata/
+*.xcschememanagement.plist
 
 # Environment files
 .env
 .env.*
 !.env.example
+config.yaml
 
 # OS generated files
 .DS_Store
@@ -42,4 +47,3 @@ Thumbs.db
 latest_activity_map.html
 
 bin/
-config.yaml

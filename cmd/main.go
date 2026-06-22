@@ -36,7 +36,6 @@ type Config struct {
 	WebPort                        string  `yaml:"web_port"`
 	WebProtocol                    string  `yaml:"web_protocol"` // "http" or "https" - use "https" when behind Cloudflare Tunnel or reverse proxy
 	TokenEncryptionKey             string  `yaml:"token_encryption_key"`
-	EnableDevAPI                   bool    `yaml:"enable_dev_api"`
 	DevReloadTemplates             bool    `yaml:"dev_reload_templates"`
 	MobileActivityOrder            string  `yaml:"mobile_activity_order"`
 	DiscoveredMapEnabled           *bool   `yaml:"discovered_map_enabled"`
@@ -60,7 +59,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error reading config file: %v", err)
 	}
-	yaml.Unmarshal(yamlFile, &config)
+	if err := yaml.Unmarshal(yamlFile, &config); err != nil {
+		log.Fatalf("Error parsing config file: %v", err)
+	}
 	applyEnvOverrides(&config)
 	normalizeConfig(&config)
 
@@ -159,7 +160,6 @@ func main() {
 		WebPort:                        config.WebPort,
 		WebProtocol:                    config.WebProtocol,
 		TokenEncryptionKey:             config.TokenEncryptionKey,
-		EnableDevAPI:                   config.EnableDevAPI,
 		DevReloadTemplates:             config.DevReloadTemplates,
 		MobileActivityOrder:            config.MobileActivityOrder,
 		DiscoveredMapEnabled:           *config.DiscoveredMapEnabled,
@@ -266,7 +266,6 @@ func applyEnvOverrides(config *Config) {
 	envString(&config.WebProtocol, "B11K_WEB_PROTOCOL")
 	envString(&config.TokenEncryptionKey, "B11K_TOKEN_ENCRYPTION_KEY")
 	envString(&config.MobileActivityOrder, "B11K_MOBILE_ACTIVITY_ORDER")
-	envBool(&config.EnableDevAPI, "B11K_ENABLE_DEV_API")
 	envBool(&config.DevReloadTemplates, "B11K_DEV_RELOAD_TEMPLATES")
 	envBoolPtr(&config.DiscoveredMapEnabled, "B11K_DISCOVERED_MAP_ENABLED")
 	envFloat(&config.DiscoveredRevealRadiusMeters, "B11K_DISCOVERED_REVEAL_RADIUS_METERS")

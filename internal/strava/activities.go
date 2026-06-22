@@ -210,8 +210,9 @@ func FetchBikeActivities(accessToken string, earliestTime time.Time, latestTime 
 		}
 
 		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
+		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -313,7 +314,9 @@ func (a *ActivitySummaryList) GetDetailedActivities(accessToken string) (BikeAct
 			return nil, err
 		}
 		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -343,7 +346,9 @@ func (a *ActivitySummaryList) GetDetailedActivities(accessToken string) (BikeAct
 			return nil, fmt.Errorf("failed to do request: %v", err)
 		}
 		body, err = io.ReadAll(resp.Body)
-		resp.Body.Close()
+		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to read body: %v", err)
 		}

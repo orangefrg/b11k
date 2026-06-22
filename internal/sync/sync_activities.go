@@ -338,7 +338,9 @@ func SyncActivitiesFromStravaWithRetry(ctx context.Context, config SyncConfig, m
 			result.SuccessfullyProcessed++
 		}
 
-		conn.Close(ctx)
+		if err := conn.Close(ctx); err != nil {
+			log.Printf("⚠️ Failed to close retry database connection: %v", err)
+		}
 		result.FailedActivities = stillFailed
 
 		if len(stillFailed) == 0 {

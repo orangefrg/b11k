@@ -10,18 +10,27 @@ The web UI can stay behind Cloudflare Access SSO. The native API must remain
 reachable by iOS without browser SSO and must rely on B11K bearer session
 tokens.
 
+Current web auth is intentionally single-user/self-hosted. Do not expose the web
+UI without Cloudflare Access or an equivalent gate unless web sessions are
+refactored to be per-user. The native API is the only public unauthenticated
+surface, and every non-auth mobile endpoint must require a B11K bearer session
+token.
+
 ## What Is Ready On Localhost/LAN
 
 - `B11K_PUBLIC_API_HOST` / `public_api_host` lets the backend know which host is
   the native API host.
+- `B11K_WEB_HOST` / `web_host` lets the backend reject unknown public Host
+  headers when a production web host is configured.
 - Requests to the configured API host are limited to `/api/mobile/*`.
 - Requests to other public hosts are not allowed to use `/api/mobile/*`.
 - Localhost and private LAN hosts are exempt so iPhone development still works.
-- `/api/mobile/dev/*` endpoints are disabled unless `B11K_ENABLE_DEV_API=true`
-  and the request comes through localhost or a private LAN host.
 - Docker defaults no longer force the rejected `b11k://strava-callback`
   redirect URI.
 - Public HTTPS deployments reject non-HTTPS forwarded requests.
+- Forwarded host, protocol, and client IP headers are trusted only when the
+  immediate peer is localhost or a private network proxy, such as Cloudflare
+  Tunnel forwarding to `localhost`.
 - Mobile API responses are marked `Cache-Control: no-store`.
 - Browser-origin requests to `/api/mobile/*` are rejected, except the Strava
   callback endpoint.
@@ -42,7 +51,6 @@ B11K_WEB_HOST=localhost
 B11K_PUBLIC_API_HOST=
 B11K_WEB_PROTOCOL=http
 B11K_IOS_REDIRECT_URI=http://<your-lan-ip>:8080/api/mobile/auth/callback
-B11K_ENABLE_DEV_API=true
 ```
 
 In Strava settings, use callback domain:
@@ -61,7 +69,6 @@ B11K_PUBLIC_API_HOST=api.b11k.example.com
 B11K_WEB_PROTOCOL=https
 B11K_STRAVA_REDIRECT_URI=https://b11k.example.com/strava/callback
 B11K_IOS_REDIRECT_URI=https://api.b11k.example.com/api/mobile/auth/callback
-B11K_ENABLE_DEV_API=false
 B11K_TOKEN_ENCRYPTION_KEY=<32-byte base64 key>
 ```
 
@@ -117,8 +124,6 @@ Stay on localhost/home LAN until:
 
 - iOS auth works through the LAN HTTP callback.
 - Sync and activity browsing work after app reinstall.
-- `/api/mobile/dev/rebuild-sync` works locally and returns 404 when
-  `B11K_ENABLE_DEV_API=false`.
 - `B11K_PUBLIC_API_HOST` host separation is tested with local `Host` headers.
 
 After that, switch to a VPS or always-on host and configure Cloudflare Tunnel.
@@ -130,7 +135,6 @@ After deploying, check:
 ```sh
 curl -i https://api.b11k.example.com/
 curl -i https://api.b11k.example.com/api/mobile/auth/start
-curl -i https://api.b11k.example.com/api/mobile/dev/rebuild-sync
 curl -i https://b11k.example.com/api/mobile/auth/callback
 curl -i https://b11k.example.com/api/mobile/auth/session
 ```
@@ -139,7 +143,6 @@ Expected:
 
 - API root returns 404.
 - API auth start returns 200 JSON.
-- Dev rebuild returns 404.
 - Web-host mobile callback reaches B11K and returns `400 missing state` when
   called manually.
 - Web-host mobile auth session is blocked by Cloudflare Access or backend 404.

@@ -21,7 +21,7 @@ services:
       retries: 20
 
   b11k-live-app:
-    image: golang:1.24-alpine
+    image: golang:1.26.4-alpine3.23
     working_dir: /workspace
     command: >
       sh -c '
@@ -51,7 +51,6 @@ services:
       B11K_WEB_PORT: "8080"
       B11K_WEB_PROTOCOL: ${B11K_WEB_PROTOCOL:-http}
       B11K_TOKEN_ENCRYPTION_KEY: ${B11K_TOKEN_ENCRYPTION_KEY:-}
-      B11K_ENABLE_DEV_API: ${B11K_ENABLE_DEV_API:-true}
       B11K_DEV_RELOAD_TEMPLATES: "true"
       B11K_MOBILE_ACTIVITY_ORDER: ${B11K_MOBILE_ACTIVITY_ORDER:-stats_first}
       B11K_DISCOVERED_MAP_ENABLED: ${B11K_DISCOVERED_MAP_ENABLED:-true}

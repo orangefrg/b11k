@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+const (
+	localRemote   = "127.0.0.1:45678"
+	privateRemote = "10.0.0.7:45678"
+	publicRemote  = "198.51.100.8:45678"
+)
+
+func newHostRequest(t *testing.T, method, host, path, remoteAddr string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, "http://"+host+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.RemoteAddr = remoteAddr
+	return req
+}
+
 func TestRequestGateSeparatesPublicAPIHost(t *testing.T) {
 	s := &server{
 		cfg: Config{
@@ -30,10 +46,14 @@ func TestRequestGateSeparatesPublicAPIHost(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, err := http.NewRequest(http.MethodGet, "http://"+tt.host+tt.path, nil)
-			if err != nil {
-				t.Fatal(err)
+			remote := publicRemote
+			if tt.host == "10.0.0.42:8080" {
+				remote = privateRemote
 			}
+			if tt.host == "localhost:8080" {
+				remote = localRemote
+			}
+			req := newHostRequest(t, http.MethodGet, tt.host, tt.path, remote)
 			if got := s.isRequestAllowed(req); got != tt.want {
 				t.Fatalf("isRequestAllowed(%q, %q) = %v, want %v", tt.host, tt.path, got, tt.want)
 			}
@@ -49,10 +69,7 @@ func TestRequestGateRequiresHTTPSOnPublicConfiguredHosts(t *testing.T) {
 		},
 	}
 
-	publicReq, err := http.NewRequest(http.MethodGet, "http://api.b11k.example.com/api/mobile/auth/start", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	publicReq := newHostRequest(t, http.MethodGet, "api.b11k.example.com", "/api/mobile/auth/start", localRemote)
 	if s.isPublicRequestTransportAllowed(publicReq) {
 		t.Fatal("public HTTP request was allowed without forwarded HTTPS")
 	}
@@ -62,12 +79,15 @@ func TestRequestGateRequiresHTTPSOnPublicConfiguredHosts(t *testing.T) {
 		t.Fatal("public HTTPS request was rejected")
 	}
 
-	localReq, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/mobile/auth/start", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	localReq := newHostRequest(t, http.MethodGet, "127.0.0.1:8080", "/api/mobile/auth/start", localRemote)
 	if !s.isPublicRequestTransportAllowed(localReq) {
 		t.Fatal("local HTTP request should remain allowed")
+	}
+
+	spoofedPublicReq := newHostRequest(t, http.MethodGet, "api.b11k.example.com", "/api/mobile/auth/start", publicRemote)
+	spoofedPublicReq.Header.Set("X-Forwarded-Proto", "https")
+	if s.isPublicRequestTransportAllowed(spoofedPublicReq) {
+		t.Fatal("direct public request should not be able to spoof forwarded HTTPS")
 	}
 }
 
@@ -93,34 +113,54 @@ func TestBrowserOriginMobileAPIRequestsAreRejected(t *testing.T) {
 	}
 }
 
-func TestRequestGateKeepsDevAPIPrivate(t *testing.T) {
-	tests := []struct {
-		name      string
-		enableDev bool
-		host      string
-		wantAllow bool
-	}{
-		{name: "disabled on LAN", enableDev: false, host: "10.0.0.42:8080", wantAllow: false},
-		{name: "enabled on LAN", enableDev: true, host: "10.0.0.42:8080", wantAllow: true},
-		{name: "enabled still blocked on public host", enableDev: true, host: "api.b11k.example.com", wantAllow: false},
+func TestRequestGateRejectsUnknownPublicHostWhenWebHostConfigured(t *testing.T) {
+	s := &server{
+		cfg: Config{
+			PublicAPIHost: "api.b11k.example.com",
+			WebHost:       "b11k.example.com",
+		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &server{
-				cfg: Config{
-					PublicAPIHost: "api.b11k.example.com",
-					EnableDevAPI:  tt.enableDev,
-				},
-			}
-			req, err := http.NewRequest(http.MethodPost, "http://"+tt.host+"/api/mobile/dev/rebuild-sync", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := s.isRequestAllowed(req); got != tt.wantAllow {
-				t.Fatalf("isRequestAllowed(dev, host=%q, enable=%v) = %v, want %v", tt.host, tt.enableDev, got, tt.wantAllow)
-			}
-		})
+	req := newHostRequest(t, http.MethodGet, "unexpected.example.com", "/profile", publicRemote)
+	if s.isRequestAllowed(req) {
+		t.Fatal("unknown public host should be rejected when web_host is configured")
+	}
+
+	webReq := newHostRequest(t, http.MethodGet, "b11k.example.com", "/profile", publicRemote)
+	if !s.isRequestAllowed(webReq) {
+		t.Fatal("configured web host should remain allowed")
+	}
+}
+
+func TestForwardedHeadersOnlyTrustedFromLocalPeer(t *testing.T) {
+	localProxyReq := newHostRequest(t, http.MethodGet, "127.0.0.1:8080", "/api/mobile/me", localRemote)
+	localProxyReq.Header.Set("X-Forwarded-Host", "api.b11k.example.com")
+	localProxyReq.Header.Set("X-Forwarded-For", "203.0.113.44")
+	localProxyReq.Header.Set("X-Forwarded-Proto", "https")
+
+	s := &server{cfg: Config{WebProtocol: "https", PublicAPIHost: "api.b11k.example.com"}}
+	if got := requestHost(localProxyReq); got != "api.b11k.example.com" {
+		t.Fatalf("requestHost through trusted proxy = %q", got)
+	}
+	if got := clientIP(localProxyReq); got != "203.0.113.44" {
+		t.Fatalf("clientIP through trusted proxy = %q", got)
+	}
+	if !s.isHTTPSRequest(localProxyReq) {
+		t.Fatal("trusted forwarded HTTPS should be accepted")
+	}
+
+	publicReq := newHostRequest(t, http.MethodGet, "api.b11k.example.com", "/api/mobile/me", publicRemote)
+	publicReq.Header.Set("X-Forwarded-Host", "b11k.example.com")
+	publicReq.Header.Set("X-Forwarded-For", "203.0.113.44")
+	publicReq.Header.Set("X-Forwarded-Proto", "https")
+	if got := requestHost(publicReq); got != "api.b11k.example.com" {
+		t.Fatalf("direct public request host = %q", got)
+	}
+	if got := clientIP(publicReq); got != "198.51.100.8" {
+		t.Fatalf("direct public clientIP should ignore spoofed XFF, got %q", got)
+	}
+	if s.isHTTPSRequest(publicReq) {
+		t.Fatal("direct public request should not be able to spoof HTTPS")
 	}
 }
 
@@ -149,5 +189,42 @@ func TestRateLimitBlocksAfterLimit(t *testing.T) {
 	ok, _ := s.consumeRateLimit("client:bucket", 2, 60_000_000_000)
 	if ok {
 		t.Fatal("third request should be rate limited")
+	}
+}
+
+func TestParseBBoxRejectsInvalidCoordinates(t *testing.T) {
+	tests := []string{
+		"",
+		"0,0,0,1",
+		"181,0,182,1",
+		"0,-91,1,0",
+		"NaN,0,1,1",
+		"0,0,+Inf,1",
+	}
+	for _, raw := range tests {
+		t.Run(raw, func(t *testing.T) {
+			if _, _, _, _, ok := parseBBox(raw); ok {
+				t.Fatalf("parseBBox(%q) unexpectedly succeeded", raw)
+			}
+		})
+	}
+
+	if minLng, minLat, maxLng, maxLat, ok := parseBBox("-1,2,3,4"); !ok || minLng != -1 || minLat != 2 || maxLng != 3 || maxLat != 4 {
+		t.Fatalf("valid bbox parsed as (%v, %v, %v, %v, %v)", minLng, minLat, maxLng, maxLat, ok)
+	}
+}
+
+func TestMobileBearerTokenFormat(t *testing.T) {
+	if !isPlausibleMobileBearerToken("abc_DEF-123") {
+		t.Fatal("expected URL-safe bearer token to be accepted")
+	}
+	if isPlausibleMobileBearerToken("") {
+		t.Fatal("empty token should be rejected")
+	}
+	if isPlausibleMobileBearerToken("abc.def") {
+		t.Fatal("unexpected token punctuation should be rejected")
+	}
+	if isPlausibleMobileBearerToken("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz") {
+		t.Fatal("oversized token should be rejected")
 	}
 }
