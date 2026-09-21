@@ -1,0 +1,18 @@
+{
+  "name": "b11k-web-tests",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test web/tests/*.test.cjs",
+    "test:install": "playwright install chromium --only-shell"
+  },
+  "devDependencies": {
+    "chart.js": "4.4.0",
+    "chartjs-adapter-date-fns": "3.0.0",
+    "date-fns": "2.30.0",
+    "maplibre-gl": "5.24.0",
+    "playwright": "1.62.1"
+  }
+}

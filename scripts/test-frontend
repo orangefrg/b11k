@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/test-frontend"
+  echo "Run real Chromium browser tests and write coverage/frontend/{summary,v8}.json."
+  echo "Setup: pnpm install --frozen-lockfile && pnpm test:install"
+  exit 0
+fi
+[[ $# == 0 ]] || { echo "Usage: ./scripts/test-frontend" >&2; exit 2; }
+cd "$(dirname "$0")/.."
+exec node --test web/tests/*.test.cjs

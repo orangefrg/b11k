@@ -22,7 +22,7 @@
       }));
       const fc = { type: 'FeatureCollection', features };
 
-      map.on('load', async () => {
+      const renderRoute = async () => {
         const routeFeature = {
           type: 'Feature',
           geometry: { type: 'LineString', coordinates: lineCoords }
@@ -211,7 +211,9 @@
               map.setPaintProperty('route-line', 'line-width', 5);
             }
           };
+          let colorRequest = 0;
           const applyColor = async () => {
+            const request = ++colorRequest;
             const metric = select.value;
             try {
               if (metric === 'none') {
@@ -240,6 +242,7 @@
                 const zr = await fetch('/api/hrzones');
                 if (!zr.ok) throw new Error('zones fetch failed');
                 const z = await zr.json();
+                if (request !== colorRequest) return;
                 const colors = ['#1b3a8a', '#00c2ff', '#2ecc71', '#f1c40f', '#e74c3c'];
                 const zonesArr = (z && z.heart_rate && Array.isArray(z.heart_rate.zones)) ? z.heart_rate.zones : [];
                 if (zonesArr.length === 0) {
@@ -561,45 +564,39 @@
 
         // Graph rendering functionality
         let chartInstance = null;
-        let graphPoints = null; // Store points for map-graph sync
+        let graphRequest = 0; // Only the latest metric selection may update the canvas.
         const metric1Select = document.getElementById('metric1-select');
         const metric2Select = document.getElementById('metric2-select');
         const xAxisSelect = document.getElementById('xaxis-select');
         const graphCanvas = document.getElementById('graph-canvas');
         const graphContainer = document.getElementById('graph-container');
         
-        // Helper function to calculate cumulative distance from points
-        const calculateCumulativeDistance = (points) => {
-          if (!points || points.length < 2) return [];
-          
-          const distances = [0]; // First point has 0 distance
-          const R = 6371000; // Earth radius in meters
-          
-          for (let i = 1; i < points.length; i++) {
-            const prev = points[i - 1];
-            const curr = points[i];
-            
-            if (!prev.lat || !prev.lng || !curr.lat || !curr.lng) {
-              distances.push(distances[i - 1]); // Use previous distance if coordinates missing
-              continue;
-            }
-            
-            const dLat = (curr.lat - prev.lat) * Math.PI / 180;
-            const dLng = (curr.lng - prev.lng) * Math.PI / 180;
-            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                       Math.cos(prev.lat * Math.PI / 180) * Math.cos(curr.lat * Math.PI / 180) *
-                       Math.sin(dLng/2) * Math.sin(dLng/2);
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-            const distance = R * c;
-            
-            distances.push(distances[i - 1] + distance);
-          }
-          
-          return distances; // Returns distances in meters
-        };
-
         if (metric1Select && metric2Select && graphCanvas) {
+          // One listener per map, independent of chart recreations and axis type.
+          map.on('click', 'route-points-layer', (e) => {
+            if (segmentCreationMode || !chartInstance) return;
+            const feature = e.features?.[0];
+            if (!feature) return;
+            const time = new Date(feature.properties.time).getTime();
+            let nearest = null;
+            let minDiff = Infinity;
+            chartInstance.data.datasets.forEach((dataset, datasetIndex) => {
+              dataset.data.forEach((point, index) => {
+                const diff = Math.abs(new Date(point.time).getTime() - time);
+                if (diff < minDiff) {
+                  minDiff = diff;
+                  nearest = { datasetIndex, index };
+                }
+              });
+            });
+            if (nearest) {
+              chartInstance.setActiveElements([nearest]);
+              chartInstance.update('none');
+            }
+          });
+
           const updateGraph = async () => {
+            const request = ++graphRequest;
             const metric1 = metric1Select.value;
             const metric2 = metric2Select.value;
             const xAxisType = xAxisSelect ? xAxisSelect.value : 'time';
@@ -613,7 +610,10 @@
               }
               if (graphContainer) graphContainer.classList.add('graph-empty');
               if (graphCanvas) graphCanvas.style.display = 'none';
-              if (placeholder) placeholder.style.display = 'block';
+              if (placeholder) {
+                placeholder.textContent = 'Select a metric above to display the graph';
+                placeholder.style.display = 'block';
+              }
               // Keep container visible so users can select metrics
               return;
             }
@@ -642,8 +642,7 @@
               }
               const data = await response.json();
               
-              // Store points for synchronization
-              graphPoints = points;
+              if (request !== graphRequest) return;
               
               // Prepare datasets
               const datasets = [];
@@ -794,7 +793,7 @@
                 }
               }
               
-              if (datasets.length === 0) return;
+              if (!datasets.some(dataset => dataset.data.length > 0)) throw new Error('No samples for the selected metrics');
               
               // Destroy existing chart properly
               if (chartInstance) {
@@ -806,185 +805,125 @@
                 chartInstance = null;
               }
               
-              // Create new chart (use setTimeout to ensure canvas is released)
-              setTimeout(() => {
-                try {
-                  const ctx = graphCanvas.getContext('2d');
-                  if (!ctx) {
-                    console.error('Failed to get canvas context');
-                    return;
-                  }
-                  
-                  // Check if Chart is available
-                  if (typeof Chart === 'undefined') {
-                    console.error('Chart.js is not loaded');
-                    return;
-                  }
-                  
-                  chartInstance = new Chart(ctx, {
-                    type: 'line',
-                    data: { datasets },
-                    options: {
-                      responsive: true,
-                      maintainAspectRatio: false,
-                      interaction: {
-                        intersect: false,
-                        mode: 'index'
-                      },
-                      plugins: {
-                        legend: {
-                          display: true,
-                          position: 'top',
-                          labels: {
-                            color: '#e0e0e0'
+              // destroy() releases the canvas synchronously.
+              const ctx = graphCanvas.getContext('2d');
+              if (!ctx) {
+                throw new Error('Failed to get canvas context');
+              }
+
+              // Check if Chart is available
+              if (typeof Chart === 'undefined') {
+                throw new Error('Chart.js is not loaded');
+              }
+
+              chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: { datasets },
+                options: {
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  interaction: {
+                    intersect: false,
+                    mode: 'index'
+                  },
+                  plugins: {
+                    legend: {
+                      display: true,
+                      position: 'top',
+                      labels: {
+                        color: '#e0e0e0'
+                      }
+                    },
+                    tooltip: {
+                      callbacks: {
+                        title: (context) => {
+                          if (xAxisType === 'distance') {
+                            const xValue = context[0].parsed.x;
+                            return `Distance: ${xValue.toFixed(2)} km`;
+                          } else {
+                            // Time axis - use default time formatting
+                            return context[0].label;
                           }
                         },
-                        tooltip: {
-                          callbacks: {
-                            title: (context) => {
-                              if (xAxisType === 'distance') {
-                                const xValue = context[0].parsed.x;
-                                return `Distance: ${xValue.toFixed(2)} km`;
-                              } else {
-                                // Time axis - use default time formatting
-                                return context[0].label;
-                              }
-                            },
-                            label: (context) => {
-                              const label = context.dataset.label || '';
-                              const value = context.parsed.y;
-                              let unit = '';
-                              if (label === 'Speed') unit = ' km/h';
-                              else if (label === 'HR') unit = ' bpm';
-                              else if (label === 'Height') unit = ' m';
-                              else if (label === 'Cadence') unit = ' rpm';
-                              return `${label}: ${value.toFixed(1)}${unit}`;
-                            }
-                          }
-                        }
-                      },
-                      scales: {
-                        x: xAxisType === 'distance' ? {
-                          type: 'linear',
-                          position: 'bottom',
-                          title: {
-                            display: true,
-                            text: 'Distance (km)',
-                            color: '#e0e0e0'
-                          },
-                          ticks: {
-                            color: '#e0e0e0',
-                            callback: function(value) {
-                              return value.toFixed(1) + ' km';
-                            }
-                          },
-                          grid: {
-                            color: '#333'
-                          }
-                        } : {
-                          type: 'time',
-                          time: {
-                            displayFormats: {
-                              minute: 'HH:mm'
-                            }
-                          },
-                          ticks: {
-                            color: '#e0e0e0'
-                          },
-                          grid: {
-                            color: '#333'
-                          }
-                        },
-                        y: {
-                          position: 'left',
-                          ticks: {
-                            color: '#e0e0e0'
-                          },
-                          grid: {
-                            color: '#333'
-                          }
-                        },
-                        y1: {
-                          type: 'linear',
-                          display: metric1 && metric2,
-                          position: 'right',
-                          ticks: {
-                            color: '#e0e0e0'
-                          },
-                          grid: {
-                            drawOnChartArea: false
-                          }
-                        }
-                      },
-                      onHover: (event, activeElements) => {
-                        if (activeElements.length > 0 && graphPoints) {
-                          const element = activeElements[0];
-                          const dataIndex = element.index;
-                          const datasetIndex = element.datasetIndex;
-                          const dataset = chartInstance.data.datasets[datasetIndex];
-                          const point = dataset.data[dataIndex];
-                          
-                          // Find corresponding point on map by time
-                          const pointTime = new Date(point.x).getTime();
-                          const mapPoint = graphPoints.find(p => {
-                            const pTime = new Date(p.time).getTime();
-                            return Math.abs(pTime - pointTime) < 1000; // Within 1 second
-                          });
-                          
-                          if (mapPoint && map.getLayer('route-points-layer')) {
-                            // Highlight point on map (temporary)
-                            // Could add a marker or change point color
-                          }
+                        label: (context) => {
+                          const label = context.dataset.label || '';
+                          const value = context.parsed.y;
+                          let unit = '';
+                          if (label === 'Speed') unit = ' km/h';
+                          else if (label === 'HR') unit = ' bpm';
+                          else if (label === 'Height') unit = ' m';
+                          else if (label === 'Cadence') unit = ' rpm';
+                          return `${label}: ${value.toFixed(1)}${unit}`;
                         }
                       }
                     }
-                  });
-                  
-                  // Map-graph synchronization: when clicking on map, highlight on graph
-                  map.on('click', 'route-points-layer', (e) => {
-                    if (segmentCreationMode || !chartInstance) return;
-                    const f = e.features && e.features[0];
-                    if (!f) return;
-                    const pointTime = new Date(f.properties.time).getTime();
-                    
-                    // Find closest point in graph
-                    let closestDataset = null;
-                    let closestIndex = -1;
-                    let minDiff = Infinity;
-                    
-                    chartInstance.data.datasets.forEach((dataset, dsIdx) => {
-                      dataset.data.forEach((dp, idx) => {
-                        let diff;
-                        if (xAxisType === 'distance') {
-                          // For distance axis, compare by time stored in data point
-                          if (dp.time) {
-                            const dpTime = new Date(dp.time).getTime();
-                            diff = Math.abs(dpTime - pointTime);
-                          } else {
-                            diff = Infinity;
-                          }
-                        } else {
-                          // For time axis, compare x values directly
-                          diff = Math.abs(dp.x - pointTime);
+                  },
+                  scales: {
+                    x: xAxisType === 'distance' ? {
+                      type: 'linear',
+                      position: 'bottom',
+                      title: {
+                        display: true,
+                        text: 'Distance (km)',
+                        color: '#e0e0e0'
+                      },
+                      ticks: {
+                        color: '#e0e0e0',
+                        callback: function(value) {
+                          return value.toFixed(1) + ' km';
                         }
-                        if (diff < minDiff) {
-                          minDiff = diff;
-                          closestDataset = dsIdx;
-                          closestIndex = idx;
+                      },
+                      grid: {
+                        color: '#333'
+                      }
+                    } : {
+                      type: 'time',
+                      time: {
+                        displayFormats: {
+                          minute: 'HH:mm'
                         }
-                      });
-                    });
-                    
-                    if (closestDataset !== null && closestIndex >= 0) {
-                      chartInstance.setActiveElements([{ datasetIndex: closestDataset, index: closestIndex }]);
-                      chartInstance.update('none');
+                      },
+                      ticks: {
+                        color: '#e0e0e0'
+                      },
+                      grid: {
+                        color: '#333'
+                      }
+                    },
+                    y: {
+                      position: 'left',
+                      ticks: {
+                        color: '#e0e0e0'
+                      },
+                      grid: {
+                        color: '#333'
+                      }
+                    },
+                    y1: {
+                      type: 'linear',
+                      display: metric1 && metric2,
+                      position: 'right',
+                      ticks: {
+                        color: '#e0e0e0'
+                      },
+                      grid: {
+                        drawOnChartArea: false
+                      }
                     }
-                  });
-                } catch (error) {
-                  console.error('Error creating chart:', error);
+                  },
                 }
-              }, 10);
+              });
+
             } catch (error) {
+              if (request !== graphRequest) return;
+              if (chartInstance) chartInstance.destroy();
+              chartInstance = null;
+              graphCanvas.style.display = 'none';
+              if (graphContainer) graphContainer.classList.add('graph-empty');
+              if (placeholder) {
+                placeholder.textContent = 'Unable to load graph. Select a metric to try again.';
+                placeholder.style.display = 'block';
+              }
               console.error('Error loading graph:', error);
             }
           };
@@ -996,7 +935,10 @@
           }
           updateGraph();
         }
-      });
+      };
+      // Cached styles can finish loading before the route request returns.
+      if (map.loaded()) renderRoute();
+      else map.once('load', renderRoute);
     });
   }
 
@@ -1618,7 +1560,7 @@
         return;
       }
 
-      map.on('load', () => {
+      const renderSegment = () => {
         // Add segment line
         map.addSource('segment', {
           type: 'geojson',
@@ -1641,7 +1583,9 @@
         
         // Calculate and display segment metrics
         calculateSegmentMetrics(coords);
-      });
+      };
+      if (map.loaded()) renderSegment();
+      else map.once('load', renderSegment);
     });
     
     function calculateSegmentMetrics(coords) {
@@ -1986,7 +1930,9 @@
       });
     }
 
+    let comparisonMapRequest = 0;
     function renderSelectedEffortsOnMap(tolerance) {
+      const request = ++comparisonMapRequest;
       clearComparisonMapLayers();
       const selections = Array.from(selectedEfforts.keys());
       if (selections.length === 0) {
@@ -1996,6 +1942,7 @@
 
       Promise.all(selections.map(activityID => fetchSegmentEffort(activityID, segmentID, tolerance)))
         .then(efforts => {
+          if (request !== comparisonMapRequest) return;
           efforts.filter(Boolean).forEach((effort, index) => {
             const color = compareColors[index];
             const lineSource = `comparison-effort-${index}`;
@@ -2301,7 +2248,9 @@
       return metric === 'speed' ? value * 3.6 : value;
     }
 
+    let comparisonGraphRequest = 0;
     function updateSegmentComparisonGraph() {
+      const request = ++comparisonGraphRequest;
       if (!metric1Select || !metric2Select || !graphCanvas) return;
       const selected = Array.from(selectedEfforts.values());
       if (selected.length === 0) {
@@ -2350,6 +2299,7 @@
           })
           .then(data => ({ activity, effortIndex, data }));
       })).then(results => {
+        if (request !== comparisonGraphRequest) return;
         const datasets = [];
 
         results.forEach(({ activity, effortIndex, data }) => {
@@ -3113,7 +3063,7 @@
     });
 
     map.on('moveend', () => {
-      fetchDiscoveredOverlay().catch(error => setStatus(error.message, 'warning'));
+      return fetchDiscoveredOverlay().catch(error => setStatus(error.message, 'warning'));
     });
 
     if (rebuildBtn) {
