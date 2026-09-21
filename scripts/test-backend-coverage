@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/test-backend-coverage"
+  echo "Run all backend tests with disposable PostGIS, the race detector, and statement coverage."
+  exit 0
+fi
+[[ $# == 0 ]] || { echo "Usage: ./scripts/test-backend-coverage" >&2; exit 2; }
+cd "$(dirname "$0")/.."
+export GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/b11k-go-cache}"
+coverage_dir="${COVERAGE_DIR:-$PWD/coverage/backend}"
+mkdir -p "$coverage_dir"
+# Cover production code across package boundaries (including SQL helpers called
+# by API tests), excluding the disposable-database test support package.
+./scripts/test-backend-integration -race \
+  -coverpkg=b11k/cmd,b11k/internal/pggeo,b11k/internal/strava,b11k/internal/sync,b11k/internal/web \
+  -coverprofile="$coverage_dir/coverage.out" ./...
+go tool cover -func="$coverage_dir/coverage.out" > "$coverage_dir/functions.txt"
+go tool cover -html="$coverage_dir/coverage.out" -o "$coverage_dir/index.html"
+tail -1 "$coverage_dir/functions.txt"
+echo "Coverage report: $coverage_dir/index.html"

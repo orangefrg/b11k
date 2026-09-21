@@ -277,7 +277,12 @@ func (s *server) handleMobileActivities(w http.ResponseWriter, r *http.Request) 
 	if perPage > 200 {
 		perPage = 200
 	}
-	start := (page - 1) * perPage
+	// Bound the page before multiplying: an arbitrary client page can otherwise
+	// overflow int and turn a harmless empty page into a slice-bounds panic.
+	start := len(activities)
+	if page-1 <= len(activities)/perPage {
+		start = (page - 1) * perPage
+	}
 	end := start + perPage
 	pagedActivities := []strava.ActivitySummary{}
 	if start < len(activities) {
