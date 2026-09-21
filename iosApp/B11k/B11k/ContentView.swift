@@ -180,6 +180,7 @@ struct ActivitiesView: View {
                             } label: {
                                 ActivityRow(activity: activity)
                             }
+                            .accessibilityIdentifier("activity-\(activity.id)")
                         }
 
                         if viewModel.hasMoreActivities {
@@ -275,6 +276,7 @@ struct ActivityDetailView: View {
                         }
                     }
                     .pickerStyle(.menu)
+                    .accessibilityIdentifier("route-paint")
 
                     VStack {
                         ActivityRouteMap(points: routeSnapshot.points, paintMetric: paintMetric)
@@ -522,7 +524,9 @@ struct ActivityRouteMap: UIViewRepresentable {
             let step = max(1, validPoints.count / 180)
             var segments: [ColoredPolyline] = []
             var previous = validPoints[0]
-            for index in stride(from: step, to: validPoints.count, by: step) {
+            var offsets = Array(stride(from: step, to: validPoints.count, by: step))
+            if offsets.last != validPoints.count - 1 { offsets.append(validPoints.count - 1) }
+            for index in offsets {
                 let current = validPoints[index]
                 if let value = metric.value(from: current) {
                     var coordinates = [
@@ -539,10 +543,16 @@ struct ActivityRouteMap: UIViewRepresentable {
         }
 
         private func routeSignature(for points: [RoutePoint], metric: RoutePaintMetric) -> String {
-            guard let first = points.first, let last = points.last else {
-                return metric.rawValue
+            // Repairs can replace interior coordinates or sensor samples while
+            // retaining the same point count and endpoints.
+            var hasher = Hasher()
+            hasher.combine(metric)
+            for point in points {
+                hasher.combine(point.lat)
+                hasher.combine(point.lng)
+                hasher.combine(metric.value(from: point))
             }
-            return "\(metric.rawValue)-\(points.count)-\(first.index)-\(last.index)-\(first.lat)-\(first.lng)-\(last.lat)-\(last.lng)"
+            return String(hasher.finalize())
         }
     }
 }
@@ -753,6 +763,7 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     @Published var isLoadingProfile = false
     @Published var isLoggingOut = false
     @Published var isMutatingSegment = false
+    @Published var segmentMutationError = ""
     @Published var isWaitingForBrowserAuth = false
 
     @Published var startDate: Date = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
@@ -1233,6 +1244,7 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
 
     func createSegment(activityID: Int64, name: String, description: String, startIndex: Int, endIndex: Int) async -> SegmentDetail? {
         guard isAuthorized else { return nil }
+        segmentMutationError = ""
         isMutatingSegment = true
         defer { isMutatingSegment = false }
 
@@ -1253,13 +1265,19 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
             show("Segment created.")
             return response.segment
         } catch {
-            handleRequestError(error)
+            if case AppError.http(401, _) = error {
+                handleRequestError(error)
+            } else {
+                // Keep the editor presented and its draft intact on recoverable errors.
+                segmentMutationError = error.localizedDescription
+            }
             return nil
         }
     }
 
     func updateSegment(id: Int64, name: String, description: String) async -> SegmentDetail? {
         guard isAuthorized else { return nil }
+        segmentMutationError = ""
         isMutatingSegment = true
         defer { isMutatingSegment = false }
 
@@ -1274,7 +1292,12 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
             show("Segment updated.")
             return response.segment
         } catch {
-            handleRequestError(error)
+            if case AppError.http(401, _) = error {
+                handleRequestError(error)
+            } else {
+                // Keep the editor presented and its draft intact on recoverable errors.
+                segmentMutationError = error.localizedDescription
+            }
             return nil
         }
     }

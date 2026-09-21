@@ -27,6 +27,11 @@ struct SegmentCreateView: View {
                         .textInputAutocapitalization(.words)
                     TextField("Description", text: $description, axis: .vertical)
                         .lineLimit(2...5)
+                    if !viewModel.segmentMutationError.isEmpty {
+                        Text(viewModel.segmentMutationError)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("segment-save-error")
+                    }
                 }
 
                 Section("Range") {
@@ -58,6 +63,7 @@ struct SegmentCreateView: View {
             }
             .navigationTitle("Create Segment")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear { viewModel.segmentMutationError = "" }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -165,10 +171,16 @@ struct SegmentMetadataEditView: View {
                         .textInputAutocapitalization(.words)
                     TextField("Description", text: $description, axis: .vertical)
                         .lineLimit(2...5)
+                    if !viewModel.segmentMutationError.isEmpty {
+                        Text(viewModel.segmentMutationError)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("segment-save-error")
+                    }
                 }
             }
             .navigationTitle("Edit Segment")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear { viewModel.segmentMutationError = "" }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {

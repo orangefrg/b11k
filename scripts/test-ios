@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Run simulator unit/UI tests with coverage, reusing release simulator recovery."""
+import argparse
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+
+root = Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--unit-only", action="store_true", help="Skip UI automation")
+parser.add_argument("--destination", default="platform=iOS Simulator,name=iPhone 17 Pro")
+parser.add_argument("--output-dir", type=Path)
+options = parser.parse_args()
+output = (options.output_dir or root / "coverage/ios" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")).resolve()
+project = (root / "iosApp/B11k/B11k.xcodeproj/project.pbxproj").read_text()
+version = re.search(r"MARKETING_VERSION = ([0-9.]+);", project)[1]
+build = re.search(r"CURRENT_PROJECT_VERSION = ([0-9]+);", project)[1]
+release = runpy.run_path(str(root / "scripts/release-apple"), run_name="b11k_test_support")
+args = release["parse_args"](["--version", version, "--build", build, "--output-dir", str(output), "--ios-test-destination", options.destination])
+args.include_ui_tests = not options.unit_only
+args.test_result_bundle = output / "tests.xcresult"
+if args.test_result_bundle.exists():
+    parser.error("Output already contains tests.xcresult; choose a new --output-dir.")
+try:
+    release["run_tests"](args, "ios")
+except release["ReleaseError"] as error:
+    sys.exit(str(error))
+report = subprocess.run(["xcrun", "xccov", "view", "--report", "--json", str(args.test_result_bundle)], check=True, capture_output=True, text=True)
+(output / "coverage.json").write_text(report.stdout)
+for target in json.loads(report.stdout)["targets"]:
+    if target["name"] == "B11k.app":
+        # The authenticated UI transport is compiled into Debug only. Do not let
+        # exercising synthetic responses inflate the production coverage figure.
+        files = [file for file in target["files"] if Path(file["path"]).name != "UITestBackend.swift"]
+        covered = sum(file["coveredLines"] for file in files)
+        total = sum(file["executableLines"] for file in files)
+        summary = {"coveredLines": covered, "executableLines": total,
+                   "lineCoverage": covered / total if total else 0,
+                   "excludedFiles": ["UITestBackend.swift"]}
+        (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        print(f"B11k app line coverage (excluding UI fixtures): {summary['lineCoverage']:.1%} ({covered}/{total})")
+print(f"Coverage and test results: {output}")

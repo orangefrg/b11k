@@ -1,43 +1,53 @@
-//
-//  B11kUITests.swift
-//  B11kUITests
-//
-//  Created in 2026.
-//
-
 import XCTest
 
 final class B11kUITests: XCTestCase {
-
-    override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
-
-        // In UI tests it is usually best to stop immediately when a failure occurs.
+    @MainActor
+    private func launchSettings() -> XCUIApplication {
         continueAfterFailure = false
-
-        // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
-    }
-
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
-    }
-
-    @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
         let app = XCUIApplication()
+        app.launchArguments = ["--ui-testing"]
         app.launch()
-
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
+        app.tabBars.buttons["Settings"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        return app
     }
 
     @MainActor
-    func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
-        measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
+    func testSignedOutSyncIsDisabledAndDateRangeIsOptional() {
+        let app = launchSettings()
+        let sync = app.buttons["Sync from Strava"]
+        app.swipeUp()
+        XCTAssertTrue(sync.waitForExistence(timeout: 5))
+        XCTAssertFalse(sync.isEnabled)
+        XCTAssertTrue(app.staticTexts["Import all cycling history, newest first. Completed activities are skipped."].exists)
+        let range = app.switches["sync-date-range"]
+        // SwiftUI exposes the whole form row as a switch. Target the trailing
+        // control instead of the label/background used to dismiss the keyboard.
+        range.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
+        XCTAssertEqual(range.value as? String, "1")
+        XCTAssertTrue(app.descendants(matching: .any)["sync-start-date"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["sync-end-date"].firstMatch.exists)
+        range.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
+        XCTAssertFalse(app.descendants(matching: .any)["sync-start-date"].firstMatch.exists)
+    }
+
+    @MainActor
+    func testSaveBackendGuidesSignedOutUserWithoutMakingNetworkRequest() {
+        let app = launchSettings()
+        let url = app.textFields["https://api.example.com"]
+        url.tap()
+        url.typeText("https://test.example")
+        app.toolbars.buttons["Done"].tap()
+        app.buttons["Check Connection"].tap()
+        XCTAssertTrue(app.alerts.staticTexts["Backend URL saved. Connect Strava next."].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testAllMainTabsRemainAvailableWhileSignedOut() {
+        let app = launchSettings()
+        for name in ["Activities", "Segments", "Discovered", "Profile", "Settings"] {
+            app.tabBars.buttons[name].tap()
+            XCTAssertTrue(app.navigationBars[name].waitForExistence(timeout: 5))
         }
     }
 }

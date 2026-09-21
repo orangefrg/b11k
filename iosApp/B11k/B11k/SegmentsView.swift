@@ -235,6 +235,7 @@ struct SegmentDetailView: View {
                     } label: {
                         Image(systemName: "pencil")
                     }
+                    .accessibilityLabel("Edit Segment")
                     .disabled(viewModel.isBusy)
 
                     Button(role: .destructive) {
@@ -242,6 +243,7 @@ struct SegmentDetailView: View {
                     } label: {
                         Image(systemName: "trash")
                     }
+                    .accessibilityLabel("Delete Segment")
                     .disabled(viewModel.isBusy)
                 }
             }
