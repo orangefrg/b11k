@@ -16,6 +16,9 @@ operations require Bash and Docker Compose v2. Test commands also require Go;
 | `./scripts/test-backend` | Run Go tests; database integration tests require an explicit test database |
 | `./scripts/test-backend-integration` | Start disposable PostGIS on a free localhost port, run all tests, then remove it |
 | `./scripts/test-backend-race` | Run that complete integration suite with Go's race detector |
+| `./scripts/test-backend-coverage` | Run the complete backend suite with race checks and write statement-coverage HTML |
+| `./scripts/test-frontend` | Run Chromium tests of web behavior and write V8 JavaScript coverage |
+| `./scripts/test-ios` | Run simulator unit and UI tests with app line coverage; `--unit-only` skips UI automation |
 | `./scripts/release-apple …` | Build, test, archive, and publish iOS; see [Apple release setup](../iosApp/B11k/IOS_DISTRIBUTION.md#command-line-internal-testflight) |
 
 Every command supports `--help`. Test scripts accept Go test arguments, for example
@@ -48,3 +51,7 @@ Compose's `.env` automatically); web assets are read from root `web/`.
 
 Utility failure-path and rsync-filter tests use only temporary files and a fake
 Docker CLI: `python3 -B -m unittest discover -s scripts/tests -p test_backend_scripts.py`.
+
+See [testing and coverage](../TESTING.md) for dependency setup, report locations,
+the measured baseline, and remaining coverage gaps. Test dependencies and reports
+are excluded from backend transfers and Docker images.

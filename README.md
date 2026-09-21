@@ -268,6 +268,15 @@ go build -o bin/b11k ./cmd
 
 ## Development Checks
 
+Repeatable coverage commands and the current coverage assessment are documented
+in [TESTING.md](TESTING.md):
+
+```bash
+./scripts/test-backend-coverage
+./scripts/test-frontend
+./scripts/test-ios
+```
+
 ```bash
 # Go tests
 go test ./...
