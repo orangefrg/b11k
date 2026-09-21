@@ -133,6 +133,19 @@ before tests start, it restarts that simulator and retries once. Test failures
 still stop the release. Simulator startup details are in `logs/ios-simulator.log`
 inside the release output directory.
 
+## Reliable sync
+
+In iOS Settings, Sync imports all cycling history, newest first. Progress is saved
+on the server, so closing the app does not cancel an import. Reopening the app
+restores status; Cancel and Retry unfinished work are available in Settings.
+A date-range import is optional, and already verified activities are skipped.
+Strava quota waits and authorization problems appear as explicit job states.
+
+Deploy the updated backend before the updated iOS app. Its startup migration
+preserves existing activities; older imports are verified once because they lack
+a completion marker. The current TestFlight app's sync endpoint remains supported.
+See [Reliable sync implementation and verification](RELIABLE_SYNC_PLAN.md).
+
 ## Web UI
 
 Main pages:

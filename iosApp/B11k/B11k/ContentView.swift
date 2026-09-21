@@ -12,7 +12,16 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
-    @StateObject private var viewModel = AppViewModel()
+    @StateObject private var viewModel: AppViewModel
+    @Environment(\.scenePhase) private var scenePhase
+
+    @MainActor init() {
+        self.init(viewModel: AppViewModel())
+    }
+
+    init(viewModel: AppViewModel) {
+        _viewModel = StateObject(wrappedValue: viewModel)
+    }
 
     var body: some View {
         TabView {
@@ -104,9 +113,14 @@ struct ContentView: View {
         .onOpenURL { url in
             Task { await viewModel.handleAuthCallback(url) }
         }
-        .task {
-            await viewModel.restoreSession()
+        .task(id: scenePhase) {
+            viewModel.setSyncAppActive(scenePhase == .active)
+            if scenePhase == .active {
+                await viewModel.restoreSession()
+                await viewModel.resumeSyncMonitoring()
+            } else { viewModel.stopSyncMonitoring() }
         }
+        .onChange(of: viewModel.baseURLString) { _, _ in viewModel.resetSyncMonitoring() }
         .alert("B11K", isPresented: $viewModel.showingMessage) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -710,6 +724,15 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     @Published var activityPage = 1
     @Published var hasMoreActivities = false
     @Published var syncSummary: SyncSummary?
+    @Published var syncJob: SyncJob?
+    @Published var syncConnectionMessage = ""
+    @Published var syncDateRangeEnabled = false
+    @Published var isChangingSync = false
+    private var syncPollingTask: Task<Void, Never>?
+    private var syncRefreshInFlight = false
+    private var syncAppIsActive = true
+    private var syncContext: String { baseURLString + "|" + sessionToken }
+
     @Published var segments: [SegmentSummary] = []
     @Published var segmentSearch = ""
     @Published var profile: ProfileSummary?
@@ -737,18 +760,30 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
 
     private var pendingState: String?
     private var authSession: ASWebAuthenticationSession?
+    private let saveToken: (String) -> Void
+    private let transport: (URLRequest) async throws -> (Data, URLResponse)
 
-    override init() {
-        let keychainToken = KeychainSessionStore.load()
-        let legacyToken = UserDefaults.standard.string(forKey: "b11k.sessionToken") ?? ""
+    override convenience init() {
+        self.init(defaults: .standard, loadToken: KeychainSessionStore.load,
+                  saveToken: KeychainSessionStore.save,
+                  transport: { try await URLSession.shared.data(for: $0) })
+    }
+
+    init(defaults: UserDefaults, loadToken: () -> String, saveToken: @escaping (String) -> Void,
+         transport: @escaping (URLRequest) async throws -> (Data, URLResponse)) {
+        self.saveToken = saveToken
+        self.transport = transport
+        _baseURLString = AppStorage(wrappedValue: "", "b11k.baseURL", store: defaults)
+        let keychainToken = loadToken()
+        let legacyToken = defaults.string(forKey: "b11k.sessionToken") ?? ""
         super.init()
 
         if !keychainToken.isEmpty {
             sessionToken = keychainToken
         } else if !legacyToken.isEmpty {
             sessionToken = legacyToken
-            KeychainSessionStore.save(legacyToken)
-            UserDefaults.standard.removeObject(forKey: "b11k.sessionToken")
+            saveToken(legacyToken)
+            defaults.removeObject(forKey: "b11k.sessionToken")
         }
     }
 
@@ -757,7 +792,7 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     }
 
     var isBusy: Bool {
-        isAuthenticating || isSyncing || isLoadingActivities || isLoadingSegments || isLoadingSegmentEfforts || isLoadingSegmentEffortDetail || isLoadingDiscovered || isLoadingDiscoveredMap || isRebuildingDiscovered || isLoadingProfile || isLoggingOut || isMutatingSegment
+        isAuthenticating || isLoadingActivities || isLoadingSegments || isLoadingSegmentEfforts || isLoadingSegmentEffortDetail || isLoadingDiscovered || isLoadingDiscoveredMap || isRebuildingDiscovered || isLoadingProfile || isLoggingOut || isMutatingSegment
     }
 
     var activityStats: ActivityStats? {
@@ -865,6 +900,7 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
             logLines.insert("Connected to Strava.", at: 0)
             profile = nil
             await loadActivities(reset: true)
+            await resumeSyncMonitoring()
         } catch {
             show(error.localizedDescription)
         }
@@ -908,6 +944,7 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
                 logLines.insert("Connected to Strava.", at: 0)
                 profile = nil
                 await loadActivities(reset: true)
+                await resumeSyncMonitoring()
             default:
                 show("Unexpected login status: \(response.status)")
             }
@@ -930,41 +967,133 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
             let response: MeResponse = try await request(baseURL.appending(path: "/api/mobile/me"), authorized: true)
             athlete = response.athlete
             await loadActivities(reset: true)
+            await resumeSyncMonitoring()
         } catch {
             handleRequestError(error)
         }
     }
 
     func sync() async {
-        guard let baseURL else {
-            show("Enter a valid backend URL.")
-            return
+        guard isAuthorized, !isChangingSync else { return }
+        if syncDateRangeEnabled && startDate > endDate {
+            show("Start date must not follow end date."); return
         }
-        isSyncing = true
-        syncSummary = nil
-        logLines = ["Sync started..."]
-        defer { isSyncing = false }
-
+        let query = syncDateRangeEnabled ? [
+            URLQueryItem(name: "start", value: Self.dateFormatter.string(from: startDate)),
+            URLQueryItem(name: "end", value: Self.dateFormatter.string(from: endDate))
+        ] : []
+        guard let url = mobileURL(path: "/api/mobile/sync/jobs", queryItems: query) else {
+            show("Enter a valid backend URL."); return
+        }
+        let context = syncContext
+        isChangingSync = true
+        defer { isChangingSync = false }
         do {
-            var components = URLComponents(url: baseURL.appending(path: "/api/mobile/sync"), resolvingAgainstBaseURL: false)
-            components?.queryItems = [
-                URLQueryItem(name: "start", value: Self.dateFormatter.string(from: startDate)),
-                URLQueryItem(name: "end", value: Self.dateFormatter.string(from: endDate))
-            ]
-            guard let url = components?.url else {
-                show("Could not build sync URL.")
+            let response: SyncJobResponse = try await request(url, method: "POST", authorized: true)
+            guard context == syncContext else { return }
+            applySyncJob(response.job)
+            beginSyncPolling()
+        } catch {
+            guard context == syncContext else { return }
+            if case AppError.http(let status, _) = error, status < 500 {
+                handleRequestError(error)
                 return
             }
-            let response: SyncResponse = try await request(url, method: "POST", authorized: true)
-            syncSummary = response.summary
-            logLines = response.logs.isEmpty ? ["Sync complete."] : response.logs
-            profile = nil
-            await loadActivities(reset: true)
-            await loadSegments()
-            await loadDiscoveredStatus()
-        } catch {
-            handleRequestError(error)
+            syncConnectionMessage = "Could not confirm sync. Checking the server for saved progress."
+            beginSyncPolling() // the POST may have succeeded despite a lost response
         }
+    }
+
+    func changeSync(_ action: String) async {
+        guard let job = syncJob, !isChangingSync,
+              let url = mobileURL(path: "/api/mobile/sync/jobs/\(job.id)/\(action)") else { return }
+        let context = syncContext
+        isChangingSync = true
+        defer { isChangingSync = false }
+        do {
+            let response: SyncJobResponse = try await request(url, method: "POST", authorized: true)
+            guard context == syncContext else { return }
+            applySyncJob(response.job)
+            if response.job?.shouldPoll == true { beginSyncPolling() }
+        } catch {
+            guard context == syncContext else { return }
+            syncConnectionMessage = "Could not update sync. Refresh status and try again."
+        }
+    }
+
+    func setSyncAppActive(_ active: Bool) {
+        syncAppIsActive = active
+        if !active { stopSyncMonitoring() }
+    }
+
+    func resumeSyncMonitoring() async {
+        guard isAuthorized, syncAppIsActive else { return }
+        await refreshSyncStatus()
+        if syncJob?.shouldPoll == true || !syncConnectionMessage.isEmpty { beginSyncPolling() }
+    }
+
+    func stopSyncMonitoring() {
+        syncPollingTask?.cancel()
+        syncPollingTask = nil
+    }
+
+    func resetSyncMonitoring() {
+        stopSyncMonitoring()
+        syncJob = nil
+        syncSummary = nil
+        isSyncing = false
+        syncConnectionMessage = ""
+    }
+
+    private func beginSyncPolling() {
+        guard syncPollingTask == nil, isAuthorized, syncAppIsActive else { return }
+        syncPollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.refreshSyncStatus()
+                if Task.isCancelled { return }
+                if self.syncJob?.shouldPoll != true && self.syncConnectionMessage.isEmpty { break }
+                do { try await Task.sleep(for: .seconds(self.syncConnectionMessage.isEmpty ? 3 : 10)) }
+                catch { return }
+            }
+            self?.syncPollingTask = nil
+        }
+    }
+
+    private func refreshSyncStatus() async {
+        guard isAuthorized, syncAppIsActive, !syncRefreshInFlight,
+              let url = mobileURL(path: "/api/mobile/sync/jobs") else { return }
+        syncRefreshInFlight = true
+        defer { syncRefreshInFlight = false }
+        let context = syncContext
+        do {
+            let response: SyncJobResponse = try await request(url, authorized: true)
+            guard context == syncContext, !Task.isCancelled else { return }
+            let oldCount = syncJob?.summary.success ?? 0
+            let wasActive = syncJob?.isActive == true
+            applySyncJob(response.job)
+            if (response.job?.summary.success ?? 0) > oldCount || (wasActive && response.job?.isActive == false) {
+                profile = nil
+                await loadActivities(reset: true)
+                if response.job?.isActive == false { await loadDiscoveredStatus() }
+            }
+        } catch {
+            guard context == syncContext, !Task.isCancelled else { return }
+            if case AppError.http(401, _) = error { handleRequestError(error); return }
+            if case AppError.http(404, _) = error {
+                syncConnectionMessage = "Update the backend to use Reliable sync."
+                stopSyncMonitoring()
+                return
+            }
+            syncConnectionMessage = "Connection interrupted. Server sync continues; reconnecting…"
+        }
+    }
+
+    private func applySyncJob(_ job: SyncJob?) {
+        syncJob = job
+        syncSummary = job?.summary
+        isSyncing = job?.isActive == true
+        syncConnectionMessage = ""
     }
 
     func loadActivities(reset: Bool = true) async {
@@ -1399,8 +1528,9 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     }
 
     private func setSessionToken(_ token: String) {
+        resetSyncMonitoring()
         sessionToken = token
-        KeychainSessionStore.save(token)
+        saveToken(token)
     }
 
     private func request<Response: Decodable>(
@@ -1439,7 +1569,7 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
     ) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.timeoutInterval = 600
+        request.timeoutInterval = url.path.contains("/sync/jobs") ? 30 : 600
         if let bodyData {
             request.httpBody = bodyData
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1453,7 +1583,7 @@ final class AppViewModel: NSObject, ObservableObject, ASWebAuthenticationPresent
             request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transport(request)
         guard let http = response as? HTTPURLResponse else {
             throw AppError.message("Invalid backend response.")
         }
@@ -2427,6 +2557,7 @@ struct SyncResponse: Decodable {
 }
 
 struct SyncSummary: Decodable {
+    let pending: Int?
     let total: Int
     let existing: Int
     let new: Int

@@ -60,22 +60,62 @@ struct SettingsView: View {
             }
 
             Section("Sync") {
-                DatePicker("Start", selection: $viewModel.startDate, displayedComponents: .date)
-                DatePicker("End", selection: $viewModel.endDate, displayedComponents: .date)
-
-                Button(viewModel.isSyncing ? "Syncing..." : "Sync from Strava") {
+                Toggle("Choose a date range", isOn: $viewModel.syncDateRangeEnabled)
+                    .accessibilityIdentifier("sync-date-range")
+                    .disabled(viewModel.isSyncing)
+                if viewModel.syncDateRangeEnabled {
+                    DatePicker("Start", selection: $viewModel.startDate, displayedComponents: .date)
+                        .accessibilityIdentifier("sync-start-date")
+                    DatePicker("End", selection: $viewModel.endDate, displayedComponents: .date)
+                        .accessibilityIdentifier("sync-end-date")
+                    Text("Dates include the full end day, in UTC.").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Import all cycling history, newest first. Completed activities are skipped.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Button(viewModel.isChangingSync ? "Contacting server…" : "Sync from Strava") {
                     focusedField = nil
                     Task { await viewModel.sync() }
                 }
-                .disabled(!viewModel.isAuthorized || viewModel.isBusy)
+                .disabled(!viewModel.isAuthorized || viewModel.isSyncing || viewModel.isChangingSync)
 
-                if let summary = viewModel.syncSummary {
-                    LabeledContent("Total", value: "\(summary.total)")
-                    LabeledContent("New", value: "\(summary.new)")
-                    LabeledContent("Existing", value: "\(summary.existing)")
-                    LabeledContent("Processed", value: "\(summary.success)")
-                    LabeledContent("Failed", value: "\(summary.failed)")
+                if let job = viewModel.syncJob {
+                    Text(job.title).font(.headline).accessibilityIdentifier("sync-state")
+                    if !job.message.isEmpty { Text(job.message).font(.caption) }
+                    if !job.discoveryDone && job.shouldPoll {
+                        ProgressView("Found \(job.summary.total) cycling activities")
+                    }
+                    LabeledContent("Imported", value: "\(job.summary.success)")
+                    LabeledContent("Already complete", value: "\(job.summary.existing)")
+                    LabeledContent("Failed", value: "\(job.summary.failed)")
+                    LabeledContent("Waiting to import", value: "\(job.summary.pending ?? 0)")
+                    if job.state == "waiting" {
+                        LabeledContent("Next attempt") { Text(job.nextAttemptAt, style: .relative) }
+                    }
+                    if let last = job.lastSuccessfulAt {
+                        LabeledContent("Last successful sync") { Text(last, format: .dateTime.month().day().hour().minute()) }
+                    }
+                    if job.isActive {
+                        Text("You can close the app. Sync continues on the server.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Cancel sync", role: .destructive) { Task { await viewModel.changeSync("cancel") } }
+                            .disabled(viewModel.isChangingSync)
+                    }
+                    if job.canRetry {
+                        Button(job.state == "cancelled" ? "Resume unfinished activities" : "Retry unfinished work") {
+                            Task { await viewModel.changeSync("retry") }
+                        }.disabled(viewModel.isChangingSync)
+                    }
+                    ForEach(job.failures) { failure in
+                        Text("Activity \(failure.activityID): \(failure.message)")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
+                if !viewModel.syncConnectionMessage.isEmpty {
+                    Text(viewModel.syncConnectionMessage).font(.caption)
+                }
+                Button("Refresh sync status") { Task { await viewModel.resumeSyncMonitoring() } }
+                    .disabled(!viewModel.isAuthorized)
             }
 
             Section("Library") {

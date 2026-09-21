@@ -1361,141 +1361,76 @@
     
     if (!form || !logEl) return;
     
-    let currentPhase = null;
-    
+    let stream = null;
     form.addEventListener('submit', (e) => {
       e.preventDefault();
+      // Reattaching must not leave another stream updating the same controls.
+      if (stream) stream.close();
       const fd = new FormData(form);
       const params = new URLSearchParams();
-      const start = fd.get('start');
-      const end = fd.get('end');
-      if (start) params.set('start', start);
-      if (end) params.set('end', end);
-      const url = '/strava/sync' + (params.toString() ? ('?' + params.toString()) : '');
+      for (const key of ['start', 'end']) {
+        if (fd.get(key)) params.set(key, fd.get(key));
+      }
       logEl.style.display = 'block';
       logEl.textContent = '';
-      // Force show progress elements
-      if (progressEl) {
-        progressEl.style.display = 'block';
-        progressEl.style.visibility = 'visible';
-        // Initialize progress bar - force visibility
-        if (progressBarContainer) {
-          progressBarContainer.style.display = 'block';
-          progressBarContainer.style.visibility = 'visible';
-          progressBarContainer.style.opacity = '1';
-        }
-        if (progressBar) {
-          // Start at 0% when sync begins
-          progressBar.style.width = '0%';
-          progressBar.style.display = 'block';
-          progressBar.style.visibility = 'visible';
-          progressBar.style.opacity = '1';
-        }
-        if (progressPhase) {
-          progressPhase.textContent = 'Starting sync...';
-        }
-        if (progressText) {
-          progressText.textContent = '';
-        }
+      for (const element of [progressEl, progressBarContainer, progressBar]) {
+        if (!element) continue;
+        element.style.display = 'block';
+        element.style.visibility = 'visible';
+        element.style.opacity = '1';
       }
-      currentPhase = null;
-      
-      const ev = new EventSource(url);
-      ev.addEventListener('log', (m) => { logEl.textContent += m.data + "\n"; });
-      ev.addEventListener('summary', (m) => { logEl.textContent += "Summary: " + m.data + "\n"; });
-      ev.addEventListener('error', (m) => { logEl.textContent += "Error: " + m.data + "\n"; });
-      ev.addEventListener('progress', (m) => {
-        try {
-          const data = JSON.parse(m.data);
-          const phase = data.phase;
-          const current = data.current || 0;
-          const total = data.total || 1;
-          const message = data.message || '';
-          
-          // Reset progress bar when phase changes
-          if (phase !== currentPhase) {
-            currentPhase = phase;
-            if (progressBar) {
-              progressBar.style.width = '0%';
-            }
-          }
-          
-          // Update progress bar based on phase
-          let percentage = 0;
-          
-          if (phase === 'fetching_activities') {
-            // Show 0% initially, then 100% when done
-            if (total > 0 && current > 0 && current === total) {
-              // Activities fetched, show 100%
-              percentage = 100;
-            } else if (total > 0 && current > 0) {
-              // Partial progress (shouldn't happen for fetching_activities, but handle it)
-              percentage = Math.round((current / total) * 100);
-            } else {
-              // Still fetching, show 0%
-              percentage = 0;
-            }
-          } else if (phase === 'fetching_details') {
-            // Reset to 0% when phase starts, then show done/total*100
-            if (total > 0) {
-              percentage = Math.round((current / total) * 100);
-            } else {
-              // No total yet, show 0%
-              percentage = 0;
-            }
-          } else if (phase === 'saving') {
-            // Reset to 0% when phase starts, then show done/total*100
-            if (total > 0) {
-              percentage = Math.round((current / total) * 100);
-            } else {
-              // No total yet, show 0%
-              percentage = 0;
-            }
-          }
-          
-          // Clamp percentage to valid range
-          percentage = Math.max(0, Math.min(100, percentage));
-          
-          if (progressBar) {
-            progressBar.style.width = percentage + '%';
-          }
-          
-          // Update phase label
-          const phaseLabels = {
-            'fetching_activities': 'Fetching activities',
-            'fetching_details': 'Fetching details',
-            'saving': 'Saving activities'
-          };
-          if (progressPhase) {
-            progressPhase.textContent = phaseLabels[phase] || phase;
-          }
-          
-          // Update progress text
-          if (progressText) {
-            if (total > 0) {
-              progressText.textContent = `${current}/${total} (${percentage}%)`;
-            } else {
-              progressText.textContent = message || 'In progress...';
-            }
-          }
-        } catch (e) {
-          // Silently ignore parsing errors
+      if (progressBar) progressBar.style.width = '0%';
+      if (progressPhase) progressPhase.textContent = 'Starting sync…';
+      if (progressText) progressText.textContent = '';
+      const ev = new EventSource('/strava/sync' + (params.size ? '?' + params : ''));
+      stream = ev;
+      const listen = (name, handler) => ev.addEventListener(name, event => {
+        if (stream === ev) handler(event);
+      });
+      listen('log', m => { logEl.textContent += m.data + "\n"; });
+      listen('summary', m => { logEl.textContent += 'Summary: ' + m.data + "\n"; });
+      listen('progress', m => {
+        let data;
+        try { data = JSON.parse(m.data); } catch { return; }
+        if (!data || typeof data !== 'object') return;
+        const count = value => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+        const current = count(data.current);
+        const total = count(data.total);
+        const discovery = ['discovering', 'fetching_activities'].includes(data.phase);
+        const finalizing = data.phase === 'finalizing';
+        const percentage = total > 0 && !discovery && !finalizing ? Math.min(100, Math.round(current / total * 100)) : 0;
+        if (progressBar) progressBar.style.width = percentage + '%';
+        const labels = {
+          discovering: 'Finding activities', fetching_activities: 'Finding activities',
+          importing: 'Importing activities', fetching_details: 'Fetching details',
+          saving: 'Saving activities', finalizing: 'Updating discovered map'
+        };
+        if (progressPhase) progressPhase.textContent = data.state === 'waiting' ? 'Waiting to retry' : (labels[data.phase] || data.phase || 'Syncing');
+        if (progressText) {
+          if (data.message) progressText.textContent = data.message;
+          else if (discovery) progressText.textContent = `${total} cycling activities found; discovery continues…`;
+          else if (finalizing) progressText.textContent = 'Activities saved; updating coverage…';
+          else progressText.textContent = total > 0 ? `${current}/${total} discovered activities (${percentage}%)` : 'In progress…';
         }
       });
-      ev.addEventListener('done', () => { 
-        ev.close(); 
-        // Hide progress bar upon completion
-        if (progressEl) {
-          progressEl.style.display = 'none';
-        }
-        location.reload(); 
+      listen('done', () => {
+        ev.close();
+        stream = null;
+        if (progressEl) progressEl.style.display = 'none';
+        location.reload();
       });
-      ev.onerror = () => { 
-        ev.close(); 
-        if (progressEl) {
-          progressEl.style.display = 'none';
+      listen('error', m => {
+        let message = m.data;
+        if (message) {
+          try { message = JSON.parse(message); } catch { /* Older servers send plain text. */ }
         }
-      };
+        message = typeof message === 'string' && message ? message : 'Connection interrupted. Sync continues on the server; submit again to reconnect.';
+        logEl.textContent += 'Error: ' + message + "\n";
+        if (progressPhase) progressPhase.textContent = 'Sync needs attention';
+        if (progressText) progressText.textContent = message;
+        ev.close();
+        stream = null;
+      });
     });
   }
 
