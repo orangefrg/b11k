@@ -255,7 +255,7 @@ func GetPointSamplesForActivity(ctx context.Context, conn *pgx.Conn, athleteID, 
 		   ST_Y(location::geometry) as lat, ST_X(location::geometry) as lng,
 		   altitude, heartrate, speed, watts, cadence, grade, moving, temperature, cumulative_distance
 	FROM point_samples
-	WHERE athlete_id = $1 AND activity_id = $2
+	WHERE athlete_id = $1 AND activity_id = $2 AND location IS NOT NULL
 	ORDER BY point_index
 	`
 

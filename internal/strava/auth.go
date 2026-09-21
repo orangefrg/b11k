@@ -136,7 +136,11 @@ func RefreshAccessToken(config StravaAuthConfig, refreshToken string) (*StravaTo
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+		status := resp.StatusCode
+		if status == 400 {
+			status = 401
+		}
+		return nil, &APIError{Status: status, RetryAt: QuotaReset(resp.Header, time.Now())}
 	}
 
 	var tokenResp StravaTokenResponse

@@ -49,13 +49,14 @@ type Config struct {
 }
 
 type server struct {
-	ctx    context.Context
-	cfg    Config
-	conn   *pgx.Conn
-	connMu syncpkg.Mutex // Mutex to serialize database access (single connection)
-	tmpl   *template.Template
-	token  string
-	user   *strava.Athlete
+	syncConnect func(context.Context) (*pgx.Conn, error)
+	ctx         context.Context
+	cfg         Config
+	conn        *pgx.Conn
+	connMu      syncpkg.Mutex // Mutex to serialize database access (single connection)
+	tmpl        *template.Template
+	token       string
+	user        *strava.Athlete
 
 	mobileMu          syncpkg.Mutex
 	mobileSessions    map[string]mobileSession
@@ -138,6 +139,8 @@ func RunServer(ctx context.Context, cfg Config) {
 		log.Printf("🔐 Public API host configured: %s", cfg.PublicAPIHost)
 	}
 
+	go s.runSyncWorker()
+
 	// Routes
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
@@ -157,6 +160,8 @@ func RunServer(ctx context.Context, cfg Config) {
 	mux.HandleFunc("/api/mobile/profile", s.handleMobileProfile)
 	mux.HandleFunc("/api/mobile/logout", s.handleMobileLogout)
 	mux.HandleFunc("/api/mobile/sync", s.handleMobileSync)
+	mux.HandleFunc("/api/mobile/sync/jobs", s.handleMobileSyncJobs)
+	mux.HandleFunc("/api/mobile/sync/jobs/", s.handleMobileSyncJobs)
 	mux.HandleFunc("/api/mobile/activities", s.handleMobileActivities)
 	mux.HandleFunc("/api/mobile/activities/", s.handleMobileActivities)
 	mux.HandleFunc("/api/mobile/segments", s.handleMobileSegments)
@@ -317,7 +322,7 @@ func (s *server) allowRequestRate(w http.ResponseWriter, r *http.Request) bool {
 	case strings.HasPrefix(path, "/api/mobile/auth/"):
 		limit = 40
 		bucket = "mobile-auth"
-	case path == "/api/mobile/sync":
+	case path == "/api/mobile/sync" || (path == "/api/mobile/sync/jobs" && r.Method == http.MethodPost):
 		limit = 12
 		window = time.Hour
 		bucket = "mobile-sync"
@@ -929,106 +934,46 @@ func (s *server) handleActivitiesAPI(w http.ResponseWriter, r *http.Request) {
 // handleStravaSyncSSE starts a sync and streams progress logs using Server-Sent Events
 func (s *server) handleStravaSyncSSE(w http.ResponseWriter, r *http.Request) {
 	if s.token == "" {
-		if cookie, err := r.Cookie(stravaTokenCookieName); err == nil {
-			s.token = cookie.Value
-		}
-	}
-	if s.token == "" {
-		http.Error(w, "not authorized with Strava", http.StatusUnauthorized)
+		http.Error(w, "not authorized with Strava", 401)
 		return
 	}
-
-	// Parse timeframe from query (?start=YYYY-MM-DD&end=YYYY-MM-DD)
-	q := r.URL.Query()
-	var startTime time.Time
-	var endTime time.Time
-	if startStr := q.Get("start"); startStr != "" {
-		if t, err := time.Parse("2006-01-02", startStr); err == nil {
-			startTime = t
-		}
+	athlete, err := strava.FetchCurrentAthlete(s.token)
+	if err != nil {
+		http.Error(w, "Reconnect Strava before syncing.", 401)
+		return
 	}
-	if endStr := q.Get("end"); endStr != "" {
-		if t, err := time.Parse("2006-01-02", endStr); err == nil {
-			endTime = t
-		}
+	start, end, err := syncTimeframe(r)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
 	}
-
+	job, err := s.startSyncJob(r.Context(), athlete.ID, start, end)
+	if err != nil {
+		http.Error(w, "Could not start sync", 500)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-
-	// helper to send a line
-	send := func(event, data string) {
-		if event != "" {
-			_, _ = w.Write([]byte("event: " + event + "\n"))
-		}
-		_, _ = w.Write([]byte("data: " + data + "\n\n"))
+	send := func(event string, data any) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
 		flusher.Flush()
 	}
-
-	send("log", "Starting sync...")
-
-	cfg := sync.SyncConfig{
-		StravaAccessToken: s.token,
-		DatabaseConfig: sync.DatabaseConfig{
-			Host:     s.cfg.PGIP,
-			Port:     s.cfg.PGPort,
-			User:     s.cfg.PGUser,
-			Password: s.cfg.PGPassword,
-			Database: s.cfg.PGDatabase,
-		},
-		Timeframe: sync.TimeframeConfig{
-			StartTime: startTime,
-			EndTime:   endTime,
-		},
-		DiscoveredMap: sync.DiscoveredMapConfig{
-			Enabled:              s.cfg.DiscoveredMapEnabled,
-			RevealRadiusMeters:   s.cfg.DiscoveredRevealRadiusMeters,
-			SampleDistanceMeters: s.cfg.DiscoveredSampleDistanceMeters,
-		},
-	}
-
-	// Create progress callback that sends SSE events
-	progressCallback := func(phase string, current, total int, message string) {
-		progressData := struct {
-			Phase   string `json:"phase"`
-			Current int    `json:"current"`
-			Total   int    `json:"total"`
-			Message string `json:"message"`
-		}{
-			Phase:   phase,
-			Current: current,
-			Total:   total,
-			Message: message,
-		}
-		progressJSON, _ := json.Marshal(progressData)
-		send("progress", string(progressJSON))
-	}
-
-	// Run sync synchronously; for large syncs consider goroutine + channels
-	result, err := sync.SyncActivitiesFromStravaWithRetry(s.ctx, cfg, 3, progressCallback)
+	job, err = s.waitSyncJob(r.Context(), athlete.ID, job.ID, func(j *sync.Job) {
+		send("progress", map[string]any{"phase": j.Phase, "state": j.State, "current": j.Summary.Success + j.Summary.Existing, "total": j.Summary.Total, "message": j.Message})
+	})
 	if err != nil {
-		send("error", "Sync failed: "+err.Error())
 		return
 	}
-
-	// Summarize
-	summary := struct {
-		Total    int `json:"total"`
-		Existing int `json:"existing"`
-		New      int `json:"new"`
-		Success  int `json:"success"`
-		Failed   int `json:"failed"`
-	}{result.TotalActivitiesFound, result.ExistingActivities, result.NewActivities, result.SuccessfullyProcessed, len(result.FailedActivities)}
-
-	b, _ := json.Marshal(summary)
-	send("summary", string(b))
+	send("summary", job.Summary)
+	if job.State != "complete" {
+		send("error", job.Message)
+		return
+	}
 	send("done", "ok")
 }
 
@@ -1147,13 +1092,14 @@ func (s *server) handleStravaCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	authCfg := strava.NewStravaAuthConfig(s.cfg.StravaClientID, s.cfg.StravaClientSecret, s.cfg.StravaRedirectURI)
-	tok, err := strava.ExchangeCodeForToken(*authCfg, code)
+	tokens, err := strava.ExchangeCodeForTokenResponse(*authCfg, code)
 	if err != nil {
 		log.Printf("❌ Token exchange error: %v", err)
 		log.Printf("💡 Check that your Strava app's redirect URI matches: %s", s.cfg.StravaRedirectURI)
 		http.Error(w, "Strava login could not be completed. Check the server logs for details.", http.StatusBadGateway)
 		return
 	}
+	tok := tokens.AccessToken
 	s.token = tok
 
 	// #nosec G124 -- local HTTP needs an insecure cookie; production HTTPS requests set Secure.
@@ -1170,6 +1116,10 @@ func (s *server) handleStravaCallback(w http.ResponseWriter, r *http.Request) {
 	// Preload athlete profile for header display
 	if a, err := strava.FetchCurrentAthlete(s.token); err == nil {
 		s.user = a
+		if _, err = s.createMobileSession(tokens, a); err != nil {
+			http.Error(w, "Could not save Strava credentials for sync.", 500)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -384,37 +384,35 @@ func (s *server) handleMobileActivityRoute(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// Compatibility endpoint for already-installed clients. Work belongs to the
+// persistent job, so disconnecting this request never discards it.
 func (s *server) handleMobileSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", 405)
 		return
 	}
 	session, ok := s.mobileSessionFromRequest(w, r)
 	if !ok {
 		return
 	}
-
-	startTime, endTime := mobileSyncTimeframeFromRequest(r)
-
-	logs := make([]string, 0, 32)
-	progressCallback := func(phase string, current, total int, message string) {
-		if total > 0 {
-			logs = append(logs, fmt.Sprintf("%s: %s (%d/%d)", phase, message, current, total))
-			return
-		}
-		logs = append(logs, fmt.Sprintf("%s: %s", phase, message))
-	}
-
-	result, err := sync.SyncActivitiesFromStravaWithRetry(s.ctx, s.mobileSyncConfig(session, startTime, endTime), 3, progressCallback)
+	start, end, err := syncTimeframe(r)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("sync failed: %v", err), http.StatusBadGateway)
+		http.Error(w, err.Error(), 400)
 		return
 	}
-
-	writeJSON(w, map[string]interface{}{
-		"summary": mobileSyncSummary(result),
-		"logs":    logs,
-	})
+	job, err := s.startSyncJob(r.Context(), session.Athlete.ID, start, end)
+	if err == nil {
+		job, err = s.waitSyncJob(r.Context(), session.Athlete.ID, job.ID, nil)
+	}
+	if err != nil {
+		http.Error(w, "Sync interrupted; reopen sync to view saved progress.", 502)
+		return
+	}
+	if job.State == "failed" || job.State == "needs_auth" {
+		http.Error(w, job.Message, 502)
+		return
+	}
+	writeJSON(w, map[string]any{"summary": job.Summary, "logs": []string{job.Message}})
 }
 
 func mobileSyncTimeframeFromRequest(r *http.Request) (time.Time, time.Time) {
@@ -705,7 +703,15 @@ func (s *server) saveMobileSession(session mobileSession) error {
 		return err
 	}
 	return s.withDB(func(conn *pgx.Conn) error {
-		_, err := conn.Exec(s.ctx, `
+		tx, err := conn.Begin(s.ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(s.ctx)
+		if _, err = tx.Exec(s.ctx, "SELECT pg_advisory_xact_lock($1)", session.Athlete.ID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(s.ctx, `
 			INSERT INTO mobile_app_sessions (
 				session_token, athlete_id, athlete_firstname, athlete_lastname, athlete_profile,
 				strava_access_token, strava_refresh_token, strava_expires_at, session_expires_at,
@@ -725,7 +731,16 @@ func (s *server) saveMobileSession(session mobileSession) error {
 				last_seen_at = NOW()
 		`, mobileSessionStorageKey(session.SessionToken), session.Athlete.ID, session.Athlete.FirstName, session.Athlete.LastName, session.Athlete.Profile,
 			accessToken, refreshToken, session.ExpiresAt, session.SessionExpiresAt)
-		return err
+		if err != nil {
+			return err
+		}
+		// A new login can rotate refresh credentials too. Keep every device in sync.
+		_, err = tx.Exec(s.ctx, `UPDATE mobile_app_sessions SET strava_access_token=$2,strava_refresh_token=$3,strava_expires_at=$4,updated_at=NOW()
+ WHERE athlete_id=$1 AND strava_expires_at<=$4`, session.Athlete.ID, accessToken, refreshToken, session.ExpiresAt)
+		if err != nil {
+			return err
+		}
+		return tx.Commit(s.ctx)
 	})
 }
 
@@ -797,34 +812,21 @@ func (s *server) loadMobileSessionByStorageKey(rawSessionToken, storageKey strin
 
 func (s *server) refreshMobileSessionIfNeeded(session mobileSession) (mobileSession, error) {
 	if !session.SessionExpiresAt.IsZero() && time.Now().After(session.SessionExpiresAt) {
-		_ = s.deleteMobileSession(session.SessionToken)
 		return mobileSession{}, fmt.Errorf("session expired")
 	}
 	if session.Token != "" && time.Until(session.ExpiresAt) > 2*time.Minute {
-		_ = s.touchMobileSession(session.SessionToken)
 		return session, nil
 	}
-	if strings.TrimSpace(session.RefreshToken) == "" {
-		return mobileSession{}, fmt.Errorf("missing Strava refresh token")
+	if session.Athlete == nil {
+		return mobileSession{}, fmt.Errorf("missing athlete")
 	}
-
-	authCfg := strava.NewStravaAuthConfig(s.cfg.StravaClientID, s.cfg.StravaClientSecret, s.cfg.IOSRedirectURI)
-	tokenResp, err := strava.RefreshAccessToken(*authCfg, session.RefreshToken)
+	token, err := s.syncToken(s.ctx, session.Athlete.ID, false)
 	if err != nil {
 		return mobileSession{}, err
 	}
-	if strings.TrimSpace(tokenResp.AccessToken) == "" {
-		return mobileSession{}, fmt.Errorf("Strava did not return an access token")
-	}
-	session.Token = tokenResp.AccessToken
-	if strings.TrimSpace(tokenResp.RefreshToken) != "" {
-		session.RefreshToken = tokenResp.RefreshToken
-	}
-	session.ExpiresAt = stravaTokenExpiry(tokenResp.ExpiresAt)
-	if err := s.saveMobileSession(session); err != nil {
-		return mobileSession{}, err
-	}
-	return session, nil
+	session.Token = token
+	// Reload metadata written by the shared refresh, preserving the bearer identity.
+	return s.loadMobileSession(session.SessionToken)
 }
 
 func (s *server) touchMobileSession(sessionToken string) error {
@@ -942,9 +944,10 @@ func (s *server) mobileSessionFromRequest(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	session, err := s.refreshMobileSessionIfNeeded(session)
-	if err != nil {
-		log.Printf("⚠️ Mobile session refresh failed: %v", err)
+	// The B11K session authenticates access to saved data independently of
+	// Strava credentials. A paused sync must remain visible after token expiry
+	// or revocation; only requests needing Strava refresh those credentials.
+	if !session.SessionExpiresAt.IsZero() && time.Now().After(session.SessionExpiresAt) {
 		http.Error(w, "invalid or expired session", http.StatusUnauthorized)
 		return mobileSession{}, false
 	}

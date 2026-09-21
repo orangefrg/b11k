@@ -1,11 +1,9 @@
 package strava
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -178,92 +176,23 @@ func (b *ActivitySummaryList) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func FetchBikeActivities(accessToken string, earliestTime time.Time, latestTime time.Time) (ActivitySummaryList, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
-	var allActivities ActivitySummaryList
-	page := 1
-	perPage := 200
-
-	fmt.Println("📄 Fetching activities page by page...")
-
-	for {
-		fmt.Printf("   Fetching page %d... ", page)
-
-		url := fmt.Sprintf("https://www.strava.com/api/v3/athlete/activities?page=%d&per_page=%d", page, perPage)
-		if !earliestTime.IsZero() {
-			url += fmt.Sprintf("&after=%d", earliestTime.Unix())
-		}
-		if !latestTime.IsZero() {
-			url += fmt.Sprintf("&before=%d", latestTime.Unix())
-		}
-
-		req, err := http.NewRequest("GET", url, nil)
+func FetchBikeActivities(accessToken string, earliestTime, latestTime time.Time) (ActivitySummaryList, error) {
+	client := NewClient(accessToken)
+	athlete, err := client.Athlete(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	var activities ActivitySummaryList
+	for page := 1; ; page++ {
+		batch, done, err := client.ActivitiesPage(context.Background(), athlete.ID, earliestTime, latestTime, page)
 		if err != nil {
 			return nil, err
 		}
-
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("failed to fetch activities with status %d: %s", resp.StatusCode, string(body))
-		}
-
-		var pageActivities ActivitySummaryList
-		if err := json.Unmarshal(body, &pageActivities); err != nil {
-			return nil, err
-		}
-
-		// If we get fewer activities than perPage, we've reached the last page
-		if len(pageActivities) < perPage {
-			allActivities = append(allActivities, pageActivities...)
-			fmt.Printf("found %d activities (last page)\n", len(pageActivities))
-			break
-		}
-
-		allActivities = append(allActivities, pageActivities...)
-		fmt.Printf("found %d activities\n", len(pageActivities))
-
-		page++
-
-		// Small delay to respect API rate limits
-		time.Sleep(100 * time.Millisecond)
-
-		// Safety check to prevent infinite loops
-		if page > 100 {
-			fmt.Println("⚠️  Reached maximum page limit (100), stopping pagination")
-			break
+		activities = append(activities, batch...)
+		if done {
+			return activities, nil
 		}
 	}
-
-	fmt.Printf("📊 Total activities fetched: %d\n", len(allActivities))
-
-	// Filter for biking activities
-	var bikingActivities ActivitySummaryList
-	for _, activity := range allActivities {
-		if activity.Type == "Ride" {
-			startDateTime, err := time.Parse(time.RFC3339, activity.StartDate)
-			if err != nil {
-				return nil, err
-			}
-			activity.StartDateTime = startDateTime
-			bikingActivities = append(bikingActivities, activity)
-		}
-	}
-
-	return bikingActivities, nil
 }
 
 func (a *ActivitySummary) ToString() string {
@@ -299,74 +228,16 @@ func (a *ActivitySummaryList) ToString() string {
 }
 
 func (a *ActivitySummaryList) GetDetailedActivities(accessToken string) (BikeActivityList, error) {
-	var detailedActivities BikeActivityList
-	client := &http.Client{Timeout: 30 * time.Second}
-	for _, activity := range *a {
-		fmt.Printf("Fetching detailed activity %d (%s)...\n", activity.ID, activity.Name)
-		activityURL := fmt.Sprintf("https://www.strava.com/api/v3/activities/%d", activity.ID)
-		req, err := http.NewRequest("GET", activityURL, nil)
+	client := NewClient(accessToken)
+	var result BikeActivityList
+	for _, summary := range *a {
+		activity, err := client.Detail(context.Background(), summary)
 		if err != nil {
-			return nil, err
+			return result, err
 		}
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		body, err := io.ReadAll(resp.Body)
-		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			return nil, err
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("failed to fetch activity with status %d: %s", resp.StatusCode, string(body))
-		}
-		var detailedActivity BikeActivity
-		if err := json.Unmarshal(body, &detailedActivity); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal activity: %v", err)
-		}
-		detailedActivity.Summary = activity
-		if detailedActivity.Gear != nil && detailedActivity.Gear.Name != "" {
-			detailedActivity.Summary.GearName = &detailedActivity.Gear.Name
-		}
-		time.Sleep(100 * time.Millisecond)
-		streamParams := url.Values{}
-		streamParams.Set("keys", strings.Join(activityStreamKeys, ","))
-		streamParams.Set("key_by_type", "true")
-		streamUrl := fmt.Sprintf("https://www.strava.com/api/v3/activities/%d/streams?%s", activity.ID, streamParams.Encode())
-		req, err = http.NewRequest("GET", streamUrl, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %v", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-		resp, err = client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to do request: %v", err)
-		}
-		body, err = io.ReadAll(resp.Body)
-		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to read body: %v", err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("failed to fetch streams with status %d: %s", resp.StatusCode, string(body))
-		}
-		streams, err := decodeRawStravaStreams(body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal streams: %v", err)
-		}
-		if err := detailedActivity.AddStreams(streams); err != nil {
-			return nil, fmt.Errorf("failed to add streams: %v", err)
-		}
-		fmt.Print(detailedActivity.StreamsSummary())
-		detailedActivities = append(detailedActivities, detailedActivity)
-
+		result = append(result, *activity)
 	}
-	return detailedActivities, nil
+	return result, nil
 }
 
 func decodeRawStravaStreams(body []byte) ([]RawStravaStream, error) {

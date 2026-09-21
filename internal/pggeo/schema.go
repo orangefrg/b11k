@@ -47,11 +47,12 @@ func CreateTables(ctx context.Context, conn *pgx.Conn) error {
 		return fmt.Errorf("failed to create helper functions: %w", err)
 	}
 
-	return nil
+	return EnsureSyncSchema(ctx, conn)
 }
 
 func TruncateTables(ctx context.Context, conn *pgx.Conn) error {
 	tables := []string{
+		"sync_job_items", "sync_jobs", "sync_api_budget",
 		"discovered_coverage_cache",
 		"discovered_activity_buffers",
 		"point_samples",
@@ -76,6 +77,7 @@ func DropAndRecreateTables(ctx context.Context, conn *pgx.Conn) error {
 	// Note: segment_activity_matches has foreign keys to both favorite_segments and activity_summaries
 	// so it needs to be dropped before those, but CASCADE will handle it anyway
 	tables := []string{
+		"sync_job_items", "sync_jobs", "sync_api_budget",
 		"segment_activity_matches", // Cache table with foreign keys
 		"discovered_coverage_cache",
 		"discovered_activity_buffers",
@@ -248,7 +250,7 @@ func createPointSamplesTable(ctx context.Context, conn *pgx.Conn) error {
 		athlete_id BIGINT NOT NULL,
 		point_index INTEGER NOT NULL,
 		time TIMESTAMPTZ NOT NULL,
-		location GEOGRAPHY(POINT, 4326) NOT NULL,
+		location GEOGRAPHY(POINT, 4326),
 		altitude DOUBLE PRECISION,
 		heartrate INTEGER,
 		speed DOUBLE PRECISION,
@@ -982,6 +984,9 @@ func ValidateAndMigrateSchema(ctx context.Context, conn *pgx.Conn, forceRebuild 
 		return err
 	}
 
+	if _, err := conn.Exec(ctx, "ALTER TABLE IF EXISTS point_samples ALTER COLUMN location DROP NOT NULL"); err != nil {
+		return err
+	}
 	expectedSchemas := GetExpectedTableSchemas()
 	var results []TableValidationResult
 
@@ -1051,6 +1056,9 @@ func ValidateAndMigrateSchema(ctx context.Context, conn *pgx.Conn, forceRebuild 
 		// Don't fail on this, migration can be done manually
 	}
 
+	if err := EnsureSyncSchema(ctx, conn); err != nil {
+		return err
+	}
 	log.Printf("✅ Schema validation completed")
 	return nil
 }
@@ -1071,6 +1079,7 @@ func ensureFavoriteSegmentColumns(ctx context.Context, conn *pgx.Conn) error {
 func ensureActivitySummaryColumns(ctx context.Context, conn *pgx.Conn) error {
 	queries := []string{
 		"ALTER TABLE IF EXISTS activity_summaries ADD COLUMN IF NOT EXISTS gear_name TEXT",
+		"ALTER TABLE IF EXISTS activity_summaries ADD COLUMN IF NOT EXISTS sync_version INTEGER NOT NULL DEFAULT 0",
 	}
 	for _, query := range queries {
 		if _, err := conn.Exec(ctx, query); err != nil {
@@ -1335,6 +1344,7 @@ func GetExpectedTableSchemas() []TableSchema {
 			Name:    "activity_summaries",
 			IsCache: false,
 			Columns: []ColumnDef{
+				{Name: "sync_version", Type: "integer", Nullable: false},
 				{Name: "id", Type: "bigint", Nullable: false},
 				{Name: "athlete_id", Type: "bigint", Nullable: false},
 				{Name: "name", Type: "text", Nullable: false},
@@ -1406,7 +1416,7 @@ func GetExpectedTableSchemas() []TableSchema {
 				{Name: "athlete_id", Type: "bigint", Nullable: false},
 				{Name: "point_index", Type: "integer", Nullable: false},
 				{Name: "time", Type: "timestamp with time zone", Nullable: false},
-				{Name: "location", Type: "geography", Nullable: false},
+				{Name: "location", Type: "geography", Nullable: true},
 				{Name: "altitude", Type: "double precision", Nullable: true},
 				{Name: "heartrate", Type: "integer", Nullable: true},
 				{Name: "speed", Type: "double precision", Nullable: true},

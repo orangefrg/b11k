@@ -418,8 +418,8 @@ func runSync(ctx context.Context, config Config) {
 			Database: config.PGDatabase,
 		},
 		Timeframe: sync.TimeframeConfig{
-			StartTime: time.Now().AddDate(0, 0, -30), // Last 30 days
-			EndTime:   time.Time{},                   // No end time (current)
+			StartTime: time.Time{}, // All cycling history, newest first
+			EndTime:   time.Time{}, // No end time (current)
 		},
 	}
 

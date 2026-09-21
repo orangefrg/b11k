@@ -10,6 +10,7 @@ import (
 	"b11k/internal/strava"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // haversineDistance calculates the distance between two points using the Haversine formula
@@ -269,7 +270,11 @@ func InsertBikeActivity(ctx context.Context, conn *pgx.Conn, activity *strava.Bi
 }
 
 // InsertActivitySummaryUpsert inserts or updates an activity summary (allows overwriting existing data)
-func InsertActivitySummaryUpsert(ctx context.Context, conn *pgx.Conn, activity *strava.ActivitySummary) error {
+type summaryWriter interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func InsertActivitySummaryUpsert(ctx context.Context, conn summaryWriter, activity *strava.ActivitySummary) error {
 	query := `
 	INSERT INTO activity_summaries (
 		id, athlete_id, name, distance, moving_time, elapsed_time, total_elevation_gain,
@@ -312,6 +317,7 @@ func InsertActivitySummaryUpsert(ctx context.Context, conn *pgx.Conn, activity *
 		max_watts = EXCLUDED.max_watts,
 		suffer_score = EXCLUDED.suffer_score,
 		updated_at = NOW()
+ WHERE activity_summaries.athlete_id = EXCLUDED.athlete_id
 	`
 
 	var startLat, startLng, endLat, endLng *float64
@@ -324,7 +330,7 @@ func InsertActivitySummaryUpsert(ctx context.Context, conn *pgx.Conn, activity *
 		endLng = &(*activity.EndLatLng)[1]
 	}
 
-	_, err := conn.Exec(ctx, query,
+	tag, err := conn.Exec(ctx, query,
 		activity.ID, activity.AthleteID, activity.Name, activity.Distance, activity.MovingTime, activity.ElapsedTime,
 		activity.TotalElevationGain, activity.Type, activity.SportType, activity.WorkoutType,
 		activity.StartDateTime, activity.UtcOffset, startLat, startLng, endLat, endLng,
@@ -334,29 +340,64 @@ func InsertActivitySummaryUpsert(ctx context.Context, conn *pgx.Conn, activity *
 		activity.SufferScore,
 	)
 
+	if err == nil && tag.RowsAffected() != 1 {
+		return fmt.Errorf("activity belongs to another athlete")
+	}
 	return err
 }
 
 // InsertBikeActivityUpsert inserts or updates a complete bike activity (allows overwriting existing data)
 func InsertBikeActivityUpsert(ctx context.Context, conn *pgx.Conn, activity *strava.BikeActivity) error {
-	// Insert/update activity summary
-	if err := InsertActivitySummaryUpsert(ctx, conn, &activity.Summary); err != nil {
-		return fmt.Errorf("failed to upsert activity summary: %w", err)
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
 	}
+	defer tx.Rollback(ctx)
+	if err = SaveActivity(ctx, tx, activity); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
 
-	// Insert/update activity geometry if we have lat/lng data
-	if len(activity.LatLngStream.Data) > 0 {
-		if err := InsertActivityGeometryUpsert(ctx, conn, activity.Summary.AthleteID, activity.Summary.ID, activity.LatLngStream.Data); err != nil {
-			return fmt.Errorf("failed to upsert activity geometry: %w", err)
+// SaveActivity writes all imported parts and completion in the caller's transaction.
+func SaveActivity(ctx context.Context, tx pgx.Tx, activity *strava.BikeActivity) error {
+	if activity.Summary.ID <= 0 || activity.Summary.AthleteID <= 0 || activity.Summary.StartDateTime.IsZero() {
+		return fmt.Errorf("activity summary is incomplete")
+	}
+	for _, p := range activity.LatLngStream.Data {
+		if len(p) != 2 || math.IsNaN(p[0]) || math.IsNaN(p[1]) || math.Abs(p[0]) > 90 || math.Abs(p[1]) > 180 {
+			return fmt.Errorf("invalid route coordinate")
 		}
 	}
-
-	// Delete existing point samples and insert new ones
-	if err := ReplacePointSamples(ctx, conn, activity); err != nil {
-		return fmt.Errorf("failed to replace point samples: %w", err)
+	if len(activity.LatLngStream.Data) > 0 && len(activity.TimeStream.Data) != len(activity.LatLngStream.Data) {
+		return fmt.Errorf("route and time stream lengths differ")
 	}
-
-	return nil
+	if err := InsertActivitySummaryUpsert(ctx, tx, &activity.Summary); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM activity_geometries WHERE activity_id=$1", activity.Summary.ID); err != nil {
+		return err
+	}
+	if len(activity.LatLngStream.Data) >= 2 {
+		points := make([]string, len(activity.LatLngStream.Data))
+		for i, p := range activity.LatLngStream.Data {
+			points[i] = fmt.Sprintf("%.8f %.8f", p[1], p[0])
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO activity_geometries(activity_id,athlete_id,route_geog,route_geog_simplified)
+  VALUES($1,$2,ST_GeogFromText($3),ST_GeogFromText($3))`, activity.Summary.ID, activity.Summary.AthleteID, "LINESTRING("+strings.Join(points, ",")+")")
+		if err != nil {
+			return err
+		}
+	}
+	if len(activity.TimeStream.Data) == 0 {
+		if _, err := tx.Exec(ctx, "DELETE FROM point_samples WHERE activity_id=$1", activity.Summary.ID); err != nil {
+			return err
+		}
+	} else if err := ReplacePointSamples(ctx, tx, activity); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, "UPDATE activity_summaries SET sync_version=1 WHERE id=$1 AND athlete_id=$2", activity.Summary.ID, activity.Summary.AthleteID)
+	return err
 }
 
 // InsertActivityGeometryUpsert inserts or updates activity geometry data
@@ -423,7 +464,11 @@ func InsertActivityGeometryUpsert(ctx context.Context, conn *pgx.Conn, athleteID
 }
 
 // ReplacePointSamples deletes existing point samples and inserts new ones
-func ReplacePointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.BikeActivity) error {
+type transactionStarter interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+func ReplacePointSamples(ctx context.Context, conn transactionStarter, activity *strava.BikeActivity) error {
 	if len(activity.TimeStream.Data) == 0 {
 		return fmt.Errorf("no time stream data available")
 	}
@@ -462,7 +507,7 @@ func ReplacePointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.B
 
 	// Insert each point
 	for i := 0; i < len(activity.TimeStream.Data); i++ {
-		var locationWKT string
+		var locationWKT *string
 		var altitude *float64
 		var heartrate *int
 		var speed *float64
@@ -476,7 +521,8 @@ func ReplacePointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.B
 		if i < len(activity.LatLngStream.Data) && len(activity.LatLngStream.Data[i]) >= 2 {
 			lat := activity.LatLngStream.Data[i][0]
 			lng := activity.LatLngStream.Data[i][1]
-			locationWKT = fmt.Sprintf("POINT(%.8f %.8f)", lng, lat) // lng, lat for PostGIS
+			point := fmt.Sprintf("POINT(%.8f %.8f)", lng, lat)
+			locationWKT = &point // lng, lat for PostGIS
 
 			// Calculate cumulative distance
 			if hasPrevPoint {
@@ -485,8 +531,6 @@ func ReplacePointSamples(ctx context.Context, conn *pgx.Conn, activity *strava.B
 			prevLat = lat
 			prevLng = lng
 			hasPrevPoint = true
-		} else {
-			continue // Skip points without location data
 		}
 
 		// Get optional sensor data

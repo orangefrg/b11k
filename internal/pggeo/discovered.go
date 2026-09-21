@@ -52,7 +52,7 @@ func RebuildDiscoveredCoverage(ctx context.Context, conn *pgx.Conn, athleteID in
 			COUNT(*) OVER (PARTITION BY p.activity_id) AS total
 		FROM point_samples p
 		JOIN activity_summaries s ON s.id = p.activity_id AND s.athlete_id = p.athlete_id
-		WHERE p.athlete_id = $1
+		WHERE p.athlete_id = $1 AND p.location IS NOT NULL
 			AND LOWER(COALESCE(s.type, '') || ' ' || COALESCE(s.sport_type, '')) ~ '(ride|bike|cycling)'
 	),
 	bucket_first AS (
@@ -318,7 +318,7 @@ func countBuildableBikeActivities(ctx context.Context, conn *pgx.Conn, athleteID
 		SELECT s.id
 		FROM activity_summaries s
 		JOIN point_samples p ON p.activity_id = s.id AND p.athlete_id = s.athlete_id
-		WHERE s.athlete_id = $1
+		WHERE s.athlete_id = $1 AND p.location IS NOT NULL
 			AND LOWER(COALESCE(s.type, '') || ' ' || COALESCE(s.sport_type, '')) ~ '(ride|bike|cycling)'
 		GROUP BY s.id
 		HAVING COUNT(*) >= 2

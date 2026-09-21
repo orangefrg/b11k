@@ -14,6 +14,13 @@ func (s *server) handleMobileProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Heart-rate zones need Strava, but losing that optional data must not
+	// invalidate the B11K session or hide the stored profile and sync status.
+	if refreshed, err := s.refreshMobileSessionIfNeeded(session); err == nil {
+		session = refreshed
+	} else {
+		session.Token = ""
+	}
 	scope := s.mobileScopeFromSession(session)
 	data, err := s.buildProfileData(scope)
 	if err != nil {
