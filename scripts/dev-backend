@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/dev-backend"
+  echo "Run the existing live development stack in the foreground."
+  exit 0
+fi
+[[ $# == 0 ]] || { echo "Usage: ./scripts/dev-backend" >&2; exit 2; }
+exec "$(dirname "$0")/../live-test.sh"

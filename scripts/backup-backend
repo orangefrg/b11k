@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/backup-backend"
+  echo "Save a compressed database backup and tag the current backend image."
+  exit 0
+fi
+[[ $# == 0 ]] || { echo "Usage: ./scripts/backup-backend" >&2; exit 2; }
+source "$(dirname "$0")/lib/backend.sh"
+require_backend
+backend_lock
+ensure_database
+new_snapshot
+dump_database
+echo "Backup complete: $snapshot_dir"

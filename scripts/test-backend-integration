@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/test-backend-integration [go test options/packages]"
+  echo "Run all tests against a disposable PostGIS container, removed on exit."
+  exit 0
+fi
+cd "$(dirname "$0")/.."
+command -v go >/dev/null
+docker info >/dev/null
+test_container=""
+cleanup() {
+  if [[ -n "$test_container" ]]; then docker rm -f -v "$test_container" >/dev/null 2>&1 || true; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# Docker assigns a free loopback port. No production Compose services, env file,
+# named volumes, or caller-supplied database URL are used.
+test_container="$(docker run --detach --rm --publish 127.0.0.1::5432 \
+  --env POSTGRES_USER=b11k_test --env POSTGRES_PASSWORD=b11k_test_only \
+  --env POSTGRES_DB=b11k_test "${B11K_TEST_POSTGIS_IMAGE:-postgis/postgis:16-3.4}")"
+ready=false
+for ((attempt=0; attempt<60; attempt++)); do
+  if docker exec "$test_container" pg_isready -h 127.0.0.1 -U b11k_test -d b11k_test >/dev/null 2>&1; then ready=true; break; fi
+  sleep 1
+done
+[[ "$ready" == true ]] || { echo "Test PostGIS did not become ready." >&2; exit 1; }
+test_address="$(docker port "$test_container" 5432/tcp)"
+[[ "$test_address" =~ ^127\.0\.0\.1:([0-9]+)$ ]] || { echo "Unexpected test port: $test_address" >&2; exit 1; }
+export B11K_TEST_DATABASE_URL="postgres://b11k_test:b11k_test_only@${test_address}/b11k_test?sslmode=disable"
+export GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/b11k-go-cache}"
+if [[ $# == 0 ]]; then set -- ./...; fi
+go test -count=1 "$@"

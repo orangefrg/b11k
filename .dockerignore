@@ -1,57 +1,25 @@
-# Binaries
-bin/
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# Only backend build inputs enter the image context.
+*
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!web/
+!web/**
 
-# Test binary, built with `go test -c`
-*.test
-
-# Output of the go coverage tool
-*.out
-
-# Dependency directories
-vendor/
-
-# Go workspace file
-go.work
-
-# IDE files
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Git
-.git/
-.gitignore
-
-# Docker
-Dockerfile
-.dockerignore
-docker-compose.yml
-
-# Documentation
-README.md
-LICENSE
-
-# Build scripts
-build.sh
-run.sh
-
-# Service files
-*.service.template
-*.service
-
-# Runtime configuration and secrets should be mounted or passed as env vars.
-config.yaml
-.env
-.env.*
-!.env.example
+# Tests, local output, and private files are not backend runtime inputs.
+**/*_test.go
+internal/testdb/
+**/.DS_Store
+**/.env
+**/.env.*
+**/secrets/
+**/*.p8
+**/*.p12
+**/*.key
+**/*.pem
+**/*.log
+**/node_modules/
+web/tests/

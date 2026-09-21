@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/status-backend"
+  exit 0
+fi
+[[ $# == 0 ]] || { echo "Usage: ./scripts/status-backend" >&2; exit 2; }
+source "$(dirname "$0")/lib/backend.sh"
+require_backend
+compose ps -a

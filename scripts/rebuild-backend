@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/rebuild-backend"
+  echo "Snapshot the backend image and database, build, migrate, restart, and wait for health."
+  exit 0
+fi
+[[ $# == 0 ]] || { echo "Usage: ./scripts/rebuild-backend" >&2; exit 2; }
+source "$(dirname "$0")/lib/backend.sh"
+require_backend
+backend_lock
+ensure_database
+new_snapshot
+echo "Building backend; snapshot: $snapshot_id"
+compose build b11k-app
+dump_database
+echo "Stopping the app while applying database migrations."
+compose stop b11k-app
+if ! compose run --rm --no-deps b11k-app ./b11k -validate-schema; then
+  echo "Migration failed; the app remains stopped. Backup: $snapshot_dir" >&2
+  echo "Inspect the error before restarting or using ./scripts/rollback-backend $snapshot_id." >&2
+  exit 1
+fi
+if ! compose up -d --no-deps --no-build --force-recreate b11k-app || ! wait_healthy b11k-app; then
+  echo "Backend update failed. Inspect ./scripts/logs-backend; previous image: ./scripts/rollback-backend $snapshot_id" >&2
+  exit 1
+fi
+printf '%s\n' "$(date -u +%FT%TZ)" > "$snapshot_dir/deployed.txt"
+echo "Backend is healthy. Snapshot: $snapshot_id"

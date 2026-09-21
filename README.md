@@ -85,6 +85,23 @@ Template edits apply on refresh because live mode sets
 docker compose -f docker-compose.live.yml restart b11k-live-app
 ```
 
+## Backend utilities and deployment
+
+```bash
+./scripts/rebuild-backend          # Back up, build, migrate, restart, health-check
+./scripts/backup-backend           # Snapshot database and current app image
+./scripts/rollback-backend         # Use the latest snapshot's previous app image
+./scripts/status-backend
+./scripts/logs-backend --follow
+./scripts/test-backend             # Go tests
+./scripts/test-backend-race        # Full suite with disposable PostGIS + race detector
+```
+
+The [backend deployment guide](deploy/README.md) includes a ready-to-edit rsync
+template that transfers only backend files and protects the server's secrets and
+backups. See the [utility reference](scripts/README.md) for development commands,
+integration tests, snapshots, and options.
+
 ## iOS App
 
 The iOS app lives in `iosApp/B11k/B11k.xcodeproj`.

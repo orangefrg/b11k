@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/test-backend [go test options/packages]"
+  echo "Run Go tests; use test-backend-integration for a disposable PostGIS database."
+  exit 0
+fi
+cd "$(dirname "$0")/.."
+export GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/b11k-go-cache}"
+if [[ $# == 0 ]]; then set -- ./...; fi
+exec go test "$@"

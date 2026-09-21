@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
 
 # Strava Bike Tracker Setup and Run Script
 
@@ -25,4 +27,4 @@ echo ""
 echo "🚀 Starting Strava Bike Tracker..."
 echo ""
 
-go run main.go
+exec go run ./cmd "$@"

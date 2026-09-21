@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/build-backend"
+  echo "Build bin/b11k for this host. Set GOOS/GOARCH for cross-compilation."
+  exit 0
+fi
+[[ $# == 0 ]] || { echo "Usage: ./scripts/build-backend" >&2; exit 2; }
+cd "$(dirname "$0")/.."
+export GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/b11k-go-cache}"
+mkdir -p bin
+go build -o bin/b11k ./cmd
+echo "Built bin/b11k. Run it from the checkout root so config.yaml and web/ are available."

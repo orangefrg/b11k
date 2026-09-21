@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/test-backend-race [go test options/packages]"
+  echo "Run tests with the race detector and a disposable PostGIS database."
+  exit 0
+fi
+if [[ $# == 0 ]]; then set -- ./...; fi
+exec "$(dirname "$0")/test-backend-integration" -race "$@"

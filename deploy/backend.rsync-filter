@@ -1,0 +1,45 @@
+# First exclude private/generated files even inside included source directories.
+- .git/
+- .DS_Store
+- secrets/
+- node_modules/
+- __pycache__/
+- *.p8
+- *.p12
+- *.pem
+- *.key
+- *.mobileprovision
+- *.log
+- *_test.go
+- /internal/testdb/
+- /web/tests/
++ /.env.example
+- .env
+- .env.*
+- /config.yaml
+
+# Runtime source and static assets. Everything else is excluded below.
++ /cmd/***
++ /internal/***
++ /web/***
++ /go.mod
++ /go.sum
++ /Dockerfile
++ /.dockerignore
++ /docker-compose.yml
++ /config.docker.yaml
++ /DEPLOYMENT_SECURITY.md
+
+# Only operational scripts are needed on the server.
++ /scripts/
++ /scripts/lib/
++ /scripts/lib/backend.sh
++ /scripts/rebuild-backend
++ /scripts/backup-backend
++ /scripts/rollback-backend
++ /scripts/logs-backend
++ /scripts/status-backend
++ /deploy/
++ /deploy/README.md
++ /deploy/backend.rsync-filter
+- *

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --help ]]; then
+  echo "Usage: ./scripts/rollback-backend [snapshot]"
+  echo "Use the saved image from a snapshot (latest by default). The database is preserved."
+  exit 0
+fi
+[[ $# -le 1 ]] || { echo "Usage: ./scripts/rollback-backend [snapshot]" >&2; exit 2; }
+source "$(dirname "$0")/lib/backend.sh"
+require_backend
+backend_lock
+select_snapshot "${1:-}"
+[[ -f "$snapshot_dir/previous-image.txt" ]] || fail "No previous image was recorded (first deployment)."
+previous_image="$(cat "$snapshot_dir/previous-image.txt")"
+[[ "$previous_image" == "b11k-backend-snapshot:$snapshot_id" ]] || fail "Unexpected image reference in snapshot."
+docker image inspect "$previous_image" >/dev/null || fail "The snapshot image is no longer available on this Docker host."
+# Use an explicit image override; do not guess Compose's generated build tag.
+cat > "$snapshot_dir/rollback.compose.yml" <<EOF
+services:
+  b11k-app:
+    image: $previous_image
+EOF
+ensure_database
+docker compose -f "$repo_root/docker-compose.yml" -f "$snapshot_dir/rollback.compose.yml" \
+  up -d --no-deps --no-build --pull never --force-recreate b11k-app
+wait_healthy b11k-app
+echo "Backend is healthy on $previous_image. Database contents were preserved."

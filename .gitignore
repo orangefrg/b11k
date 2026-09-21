@@ -57,3 +57,6 @@ secrets/
 *.xcarchive/
 *.ipa
 __pycache__/
+
+# Private backend database snapshots and operation locks
+backups/
