@@ -1,0 +1,730 @@
+#!/usr/bin/env python3
+"""Build B11K for iOS and publish to internal TestFlight.
+
+Uses Python 3.9+, Xcode, and system OpenSSL; no third-party Python packages.
+Run --help or see iosApp/B11k/IOS_DISTRIBUTION.md. Default: local archive.
+Adapted from the Skupobrate release utility; no checkout of it is required.
+"""
+
+import argparse
+import base64
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+ROOT = Path(__file__).resolve().parent.parent
+PROJECT = ROOT / "iosApp/B11k/B11k.xcodeproj"
+BUNDLE_ID = "com.apetrikov.b11k"
+PLATFORMS = {
+    "ios": ("B11k", "generic/platform=iOS", "IOS", "B11kTests"),
+}
+API_ROOT = "https://api.appstoreconnect.apple.com"
+ASC_VARIABLES = ("ASC_KEY_PATH", "ASC_KEY_ID", "ASC_ISSUER_ID")
+
+
+class ReleaseError(Exception):
+    pass
+
+
+class SimulatorLaunchError(ReleaseError):
+    """A simulator launch failure before tests could run; eligible for one retry."""
+
+
+def require(condition, message):
+    if not condition:
+        raise ReleaseError(message)
+
+
+def project_team():
+    teams = set(re.findall(r'DEVELOPMENT_TEAM = "?([A-Z0-9]{10})"?;',
+                           (PROJECT / "project.pbxproj").read_text()))
+    require(len(teams) == 1, "Set --team-id or APPLE_TEAM_ID; the project has no unique signing team.")
+    return teams.pop()
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--version", required=True, help="Marketing version, e.g. 1.0 or 1.0.1")
+    parser.add_argument("--build", required=True, help="Unused positive integer build number, e.g. 3")
+    parser.add_argument("--distribute", choices=("archive", "export", "testflight"), default="archive",
+                        help="archive: local .xcarchive; export: local IPA; testflight: upload for internal testing")
+    parser.add_argument("--team-id", default=os.environ.get("APPLE_TEAM_ID"), help="Default: APPLE_TEAM_ID or the Xcode project's team")
+    parser.add_argument("--output-dir", type=Path, help="Default: dist/apple/VERSION-BUILD")
+    parser.add_argument("--env-file", type=Path, help="Read all three ASC credentials from this dotenv file instead of the shell environment")
+    parser.add_argument("--unsigned", action="store_true", help="Local compile/version verification only; archive mode only")
+    parser.add_argument("--skip-tests", action="store_true", help="Skip the default platform unit suites")
+    parser.add_argument("--ios-test-destination", default=os.environ.get("IOS_TEST_DESTINATION", "platform=iOS Simulator,name=iPhone 17 Pro"))
+    provisioning = parser.add_mutually_exclusive_group()
+    provisioning.add_argument("--allow-provisioning-updates", action="store_true", default=True,
+                              help="Allow Xcode to obtain signing profiles/certificates (default for signed releases)")
+    provisioning.add_argument("--no-provisioning-updates", action="store_false", dest="allow_provisioning_updates",
+                              help="Use only locally available signing material; disable automatic provisioning")
+    parser.add_argument("--signing-auth", choices=("api-key", "xcode"), default="api-key",
+                        help="Xcode signing/upload authentication: API key when supplied (default), or the account signed into Xcode")
+    parser.add_argument("--group", action="append", default=[], help="Exact existing INTERNAL TestFlight group name; repeatable")
+    parser.add_argument("--processing-timeout", type=int, default=1200, help="Seconds to wait per uploaded build (default: 1200)")
+    parser.add_argument("--resume", action="store_true", help="Reuse this output directory's verified archives and upload state")
+    parser.add_argument("--retry-upload", action="store_true", help="With --resume, retry an uncertain upload only after confirming Apple did not receive it")
+    parser.add_argument("--dry-run", action="store_true", help="Show the plan without creating files, building, or contacting Apple")
+    args = parser.parse_args(argv)
+    args.team_id = args.team_id or project_team()
+    require(re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?", args.version),
+            "--version must be a numeric major.minor[.patch] version without leading zeroes.")
+    require(re.fullmatch(r"[1-9][0-9]*", args.build), "--build must be a positive integer without leading zeroes.")
+    require(re.fullmatch(r"[A-Z0-9]{10}", args.team_id), "--team-id must be a 10-character Apple team ID.")
+    require(not args.unsigned or args.distribute == "archive", "--unsigned is only allowed with --distribute archive.")
+    require(not args.group or args.distribute == "testflight", "--group requires --distribute testflight.")
+    require(not args.retry_upload or args.resume, "--retry-upload requires --resume.")
+    require(args.processing_timeout > 0, "--processing-timeout must be positive.")
+    args.platforms = ["ios"]
+    args.output_dir = (args.output_dir or ROOT / "dist/apple" / (args.version + "-" + args.build)).expanduser().resolve()
+    return args
+
+
+def read_credentials_file(path):
+    """Read literal dotenv assignments; never source a file or expand shell expressions."""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeError):
+        raise ReleaseError("Cannot read --env-file as UTF-8 text.") from None
+    values = {}
+    for number, line in enumerate(lines, 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)", line)
+        require(match, "Invalid assignment in --env-file at line " + str(number) + ".")
+        name, value = match.groups()
+        if name not in ASC_VARIABLES:
+            continue
+        require(name not in values, "Duplicate " + name + " in --env-file at line " + str(number) + ".")
+        try:
+            parts = shlex.split(value, comments=True, posix=True)
+        except ValueError:
+            raise ReleaseError("Invalid quoting in --env-file at line " + str(number) + ".") from None
+        require(len(parts) <= 1, "Quote values containing spaces in --env-file at line " + str(number) + ".")
+        values[name] = parts[0] if parts else ""
+        require("\0" not in values[name], "Invalid value in --env-file at line " + str(number) + ".")
+    require(all(values.get(name) for name in ASC_VARIABLES),
+            "--env-file must provide nonempty ASC_KEY_PATH, ASC_KEY_ID, and ASC_ISSUER_ID together.")
+    return values
+
+
+def credentials(required=False, env_file=None):
+    env_path = Path(env_file).expanduser().resolve() if env_file is not None else None
+    source = read_credentials_file(env_path) if env_path is not None else os.environ
+    values = [source.get(key, "") for key in ASC_VARIABLES]
+    require(not any(values) or all(values), "Set ASC_KEY_PATH, ASC_KEY_ID, and ASC_ISSUER_ID together (team API key).")
+    require(not required or all(values), "Upload modes require ASC_KEY_PATH, ASC_KEY_ID, and ASC_ISSUER_ID.")
+    if all(values):
+        key_path = Path(values[0]).expanduser()
+        if env_path is not None and not key_path.is_absolute():
+            key_path = env_path.parent / key_path
+        values[0] = str(key_path.resolve())
+        require(Path(values[0]).is_file(), "ASC_KEY_PATH does not point to a readable .p8 key file.")
+    return values
+
+
+def auth_arguments(creds):
+    if not all(creds):
+        return []
+    return ["-authenticationKeyPath", creds[0], "-authenticationKeyID", creds[1], "-authenticationKeyIssuerID", creds[2]]
+
+
+def signing_auth_arguments(args, creds):
+    # The ASC key still handles processing and groups in xcode mode.
+    return [] if args.signing_auth == "xcode" else auth_arguments(creds)
+
+
+def display_command(command):
+    result = []
+    hide = False
+    for value in map(str, command):
+        result.append("<credential>" if hide else value)
+        hide = value in ("-authenticationKeyPath", "-authenticationKeyID", "-authenticationKeyIssuerID")
+    return shlex.join(result)
+
+
+def signing_failure_hint(output, command):
+    """Explain known signing failures without echoing Xcode's credential-bearing output."""
+    message = output.lower()
+    missing_team = re.search(r'no account for team "([a-z0-9]{10})"', message)
+    if missing_team:
+        return ("Xcode has no authenticated account for signing team " + missing_team[1].upper() + ". "
+                "Check that --team-id / APPLE_TEAM_ID (default: the Xcode project's team) matches the team owning the app. "
+                "Sign into that team in Xcode Settings > Accounts, or use --signing-auth api-key with its credentials. "
+                "With --signing-auth xcode, --env-file supplies App Store Connect access but does not change Xcode's signing account. "
+                "If correcting the team ID, use a new --output-dir; --resume requires the saved team.")
+    if "no accounts" in message or "session has expired" in message or "unable to log in" in message:
+        return ("Refresh the account login in Xcode Settings > Accounts, or use --signing-auth api-key with valid "
+                "ASC credentials and signing permissions, then resume.")
+    if "cloud signing permission error" in message or "access to cloud-managed distribution certificates" in message:
+        return ("Apple denied access to cloud-managed distribution certificates. Check the signing account/key's "
+                "cloud-signing permissions. To use the account already signed into Xcode, resume with --signing-auth xcode.")
+    if "no signing certificate" in message or "no profiles for" in message:
+        if "-allowProvisioningUpdates" not in command:
+            return ("Automatic provisioning is disabled. Resume with --allow-provisioning-updates so Xcode can obtain "
+                    "signing material.")
+        if command[-1] == "archive":
+            return ("Automatic provisioning was enabled, but Xcode could not obtain the archive's signing certificate/profile. "
+                    "Check that the selected team owns the bundle ID and that its Xcode account or API key has signing access. "
+                    "See the archive log for the missing profile or certificate.")
+        return ("App Store export requires distribution signing; an Apple Development certificate only covers development. "
+                "Automatic provisioning was enabled. Check the signing account's distribution/cloud-signing access or "
+                "install the distribution certificate with its private key through Xcode Settings > Accounts > Manage Certificates. "
+                "If the API key lacks signing access, resume with --signing-auth xcode to use your Xcode account.")
+    return ""
+
+
+def test_failure_hint(output):
+    message = output.lower()
+    if "simulator device failed to launch" in message and "application failed preflight checks" in message:
+        return ("The simulator could not launch the test runner (application preflight failed). "
+                "The simulator may still consider the app to be updating. "
+                "If this persists after simulator recovery, select another installed "
+                "simulator with --ios-test-destination 'platform=iOS Simulator,id=UUID'.")
+    if "unable to find a destination" in message or "ineligible destinations" in message:
+        return ("The selected test simulator is unavailable or incompatible. Install a compatible iOS runtime "
+                "in Xcode and choose it with --ios-test-destination 'platform=iOS Simulator,id=UUID'.")
+    return ""
+
+
+def retryable_simulator_launch(output):
+    message = output.lower()
+    # Do not turn a failed assertion or compilation into a passing release by retrying.
+    real_failure = re.search(
+        r"test case |test suite |test run started|test .* failed after|assertion fail|expectation failed|"
+        r"^.*:\d+(?::\d+)?: (?:fatal )?error:|^(?:fatal )?error:", message, re.MULTILINE)
+    return not real_failure and all(marker in message for marker in (
+        "simulator device failed to launch", "application failed preflight checks", "busy"))
+
+
+def run(command, log=None, dry_run=False, timeout=None):
+    command = list(map(str, command))
+    print("+ " + display_command(command), flush=True)
+    if dry_run:
+        return
+    try:
+        if log:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            print("  Log: " + str(log), flush=True)
+            start = log.stat().st_size if log.exists() else 0
+            with log.open("a") as stream:
+                result = subprocess.run(command, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT, timeout=timeout)
+        else:
+            result = subprocess.run(command, cwd=ROOT, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ReleaseError("Command timed out: " + command[0] + ("; see " + str(log) if log else "")) from None
+    if result.returncode != 0:
+        message = "Command failed: " + command[0] + ("; see " + str(log) if log else "")
+        output = ""
+        if log and ("-exportArchive" in command or command[-1] in ("test", "archive")):
+            with log.open("rb") as stream:
+                # Retry decisions must see any earlier test execution/failure in
+                # this attempt, but must ignore previous append-only attempts.
+                stream.seek(start if command[-1] == "test" else max(start, log.stat().st_size - 65536))
+                output = stream.read().decode("utf-8", errors="replace")
+                hint = test_failure_hint(output) if command[-1] == "test" else signing_failure_hint(output, command)
+            if hint:
+                message += "\n" + hint + " With unchanged release settings, reuse the same version/build and output directory with --resume."
+        if command[-1] == "test" and retryable_simulator_launch(output):
+            raise SimulatorLaunchError(message)
+        raise ReleaseError(message)
+
+
+def export_options(args, destination):
+    return {"method": "app-store-connect", "destination": destination,
+            "teamID": args.team_id, "signingStyle": "automatic",
+            "manageAppVersionAndBuildNumber": False, "uploadSymbols": True,
+            "testFlightInternalTestingOnly": True}
+
+
+def archive_command(args, platform, creds):
+    scheme, destination, _, _ = PLATFORMS[platform]
+    command = ["xcodebuild", "-project", PROJECT, "-scheme", scheme, "-configuration", "Release",
+               "-destination", destination, "-archivePath", args.output_dir / (platform + ".xcarchive"),
+               "-derivedDataPath", args.output_dir / "DerivedData" / platform,
+               "MARKETING_VERSION=" + args.version, "CURRENT_PROJECT_VERSION=" + args.build,
+               "DEVELOPMENT_TEAM=" + args.team_id, "CODE_SIGN_STYLE=Automatic",
+               "DEBUG_INFORMATION_FORMAT=dwarf-with-dsym"]
+    if args.unsigned:
+        command += ["CODE_SIGNING_ALLOWED=NO"]
+    else:
+        command += ["CODE_SIGNING_ALLOWED=YES"] + signing_auth_arguments(args, creds)
+        if args.allow_provisioning_updates:
+            command += ["-allowProvisioningUpdates"]
+    return command + ["archive"]
+
+
+def test_command(args, platform):
+    scheme, _, _, suite = PLATFORMS[platform]
+    destination = getattr(args, "resolved_test_destination", args.ios_test_destination)
+    command = ["xcodebuild", "-project", PROJECT, "-scheme", scheme, "-configuration", "Debug",
+               "-destination", destination, "-derivedDataPath", args.output_dir / "TestDerivedData" / platform,
+               # Run on the selected simulator rather than an Xcode-created parallel clone.
+               "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
+               "-only-testing:" + suite, "MARKETING_VERSION=" + args.version, "CURRENT_PROJECT_VERSION=" + args.build]
+    command += ["CODE_SIGNING_ALLOWED=NO"]
+    if getattr(args, "include_ui_tests", False):
+        command += ["-only-testing:B11kUITests"]
+    if getattr(args, "test_result_bundle", None):
+        command += ["-enableCodeCoverage", "YES", "-resultBundlePath", args.test_result_bundle,
+                    # Keep XCTest failure attachments without a ten-minute
+                    # simulator sysdiagnose on ordinary assertion failures.
+                    "-collect-test-diagnostics", "never"]
+    return command + ["test"]
+
+
+def select_test_simulator(destination, devices):
+    fields = {}
+    for part in destination.split(","):
+        key, separator, value = part.strip().partition("=")
+        require(separator and key not in fields, "Invalid --ios-test-destination.")
+        fields[key] = value.strip()
+    require(fields.get("platform") == "iOS Simulator", "Release tests require an iOS Simulator destination.")
+    require(set(fields) <= {"platform", "id", "name", "OS", "arch"}, "Unsupported simulator destination field.")
+    require(bool(fields.get("id")) != bool(fields.get("name")), "Select the test simulator by either name or id.")
+    candidates = []
+    for runtime, entries in devices.items():
+        match = re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-([0-9-]+)", runtime)
+        if not match:
+            continue
+        version = tuple(int(part) for part in match[1].split("-"))
+        requested_os = fields.get("OS", "latest")
+        if requested_os != "latest" and requested_os != ".".join(map(str, version)):
+            continue
+        for device in entries:
+            if not device.get("isAvailable"):
+                continue
+            if fields.get("id") and device.get("udid", "").lower() != fields["id"].lower():
+                continue
+            if fields.get("name") and device.get("name") != fields["name"]:
+                continue
+            candidates.append((version, device))
+    require(candidates, "No available simulator matches --ios-test-destination. Check xcrun simctl list devices available.")
+    newest = max(version for version, _ in candidates)
+    matches = [device for version, device in candidates if version == newest]
+    require(len(matches) == 1, "Multiple simulators match; use --ios-test-destination 'platform=iOS Simulator,id=UUID'.")
+    device = matches[0]
+    resolved = "platform=iOS Simulator,id=" + device["udid"]
+    if fields.get("arch"):
+        resolved += ",arch=" + fields["arch"]
+    return device, resolved
+
+
+def list_test_simulators():
+    try:
+        result = subprocess.run(["xcrun", "simctl", "list", "devices", "available", "--json"],
+                                capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise ReleaseError("Simulator service did not respond. Restart Xcode's simulator service and resume.") from None
+    require(result.returncode == 0, "Cannot list iOS simulators. Check Xcode's installed runtimes and simulator service.")
+    try:
+        return json.loads(result.stdout)["devices"]
+    except (ValueError, KeyError):
+        raise ReleaseError("Cannot read the simulator inventory from simctl.") from None
+
+
+def prepare_test_simulator(args, platform):
+    device, args.resolved_test_destination = select_test_simulator(args.ios_test_destination, list_test_simulators())
+    print("Preparing simulator: " + device["name"] + " (" + device["udid"] + ")", flush=True)
+    run(["xcrun", "simctl", "bootstatus", device["udid"], "-b"],
+        args.output_dir / "logs" / (platform + "-simulator.log"), timeout=180)
+    return device["udid"]
+
+
+def run_tests(args, platform):
+    device_id = prepare_test_simulator(args, platform)
+    log = args.output_dir / "logs" / (platform + "-tests.log")
+    try:
+        run(test_command(args, platform), log)
+    except SimulatorLaunchError:
+        print("Simulator reported Busy before tests launched. Restarting this simulator and retrying once.", flush=True)
+        bundle = getattr(args, "test_result_bundle", None)
+        if bundle and bundle.exists():
+            # xcodebuild refuses an existing result path, even when the first
+            # attempt never launched tests. Keep its diagnostics beside the retry.
+            bundle.rename(bundle.with_name(bundle.stem + "-launch-failed.xcresult"))
+        simulator_log = args.output_dir / "logs" / (platform + "-simulator.log")
+        # Xcode can shut its simulator down when a launch fails.
+        device, _ = select_test_simulator("platform=iOS Simulator,id=" + device_id, list_test_simulators())
+        if device.get("state") != "Shutdown":
+            run(["xcrun", "simctl", "shutdown", device_id], simulator_log, timeout=60)
+        run(["xcrun", "simctl", "bootstatus", device_id, "-b"], simulator_log, timeout=180)
+        run(test_command(args, platform), log)
+
+
+def export_command(args, platform, destination, creds):
+    command = ["xcodebuild", "-exportArchive", "-archivePath", args.output_dir / (platform + ".xcarchive"),
+               "-exportOptionsPlist", args.output_dir / (destination + "-options.plist"),
+               "-exportPath", args.output_dir / destination / platform] + signing_auth_arguments(args, creds)
+    if args.allow_provisioning_updates:
+        command += ["-allowProvisioningUpdates"]
+    return command
+
+
+def verify_archive(args, platform):
+    archive = args.output_dir / (platform + ".xcarchive")
+    with (archive / "Info.plist").open("rb") as stream:
+        properties = plistlib.load(stream).get("ApplicationProperties", {})
+    products = (archive / "Products").resolve()
+    app = (products / properties.get("ApplicationPath", "")).resolve()
+    require(products in app.parents and app.suffix == ".app" and app.is_dir(), "Archive must contain one application: " + str(archive))
+    bundles = [app] + sorted(app.rglob("*.appex"))
+    require(len(bundles) == 1, "Unexpected extension in B11K archive; configure its bundle validation first.")
+    for bundle in bundles:
+        info_path = bundle / ("Contents/Info.plist" if (bundle / "Contents").is_dir() else "Info.plist")
+        with info_path.open("rb") as stream:
+            info = plistlib.load(stream)
+        require(str(info.get("CFBundleShortVersionString")) == args.version and str(info.get("CFBundleVersion")) == args.build,
+                "Version/build mismatch in " + str(bundle))
+        require(info.get("CFBundleIdentifier") == BUNDLE_ID, "Unexpected bundle ID in " + str(bundle))
+        if not args.unsigned:
+            run(["codesign", "--verify", "--strict", "--deep", bundle], args.output_dir / "logs" / (platform + "-validation.log"))
+    print("Verified " + platform + " archive and " + str(len(bundles) - 1) + " extension(s): " + args.version + " (" + args.build + ")", flush=True)
+
+
+def source_fingerprint():
+    result = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
+                             "iosApp/B11k"],
+                            cwd=ROOT, capture_output=True)
+    require(result.returncode == 0, "Cannot record the release's source files.")
+    paths = {ROOT / os.fsdecode(value) for value in result.stdout.split(b"\0") if value}
+    paths.add(PROJECT / "project.pbxproj")
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        if path.is_file():
+            digest.update(str(path.relative_to(ROOT)).encode() + b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def b64url(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def raw_es256_signature(der):
+    # OpenSSL produces DER ECDSA integers; JWT requires fixed-width R || S.
+    require(len(der) >= 8 and der[0] == 0x30 and der[1] == len(der) - 2, "Invalid P-256 signature.")
+    parts, offset = [], 2
+    for _ in range(2):
+        require(offset + 2 <= len(der) and der[offset] == 2, "Invalid ECDSA integer.")
+        size = der[offset + 1]
+        value = der[offset + 2:offset + 2 + size]
+        require(len(value) == size and size > 0 and value[0] < 128, "Invalid ECDSA integer length/sign.")
+        value = value.lstrip(b"\0")
+        require(len(value) <= 32, "API key must use the P-256 curve.")
+        parts.append(value.rjust(32, b"\0"))
+        offset += 2 + size
+    require(offset == len(der), "Unexpected ECDSA signature data.")
+    return b"".join(parts)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        raise ReleaseError("Refusing to redirect an authenticated App Store Connect request.")
+
+
+class AppStoreConnect:
+    def __init__(self, creds):
+        self.creds = creds
+        self.opener = urllib.request.build_opener(NoRedirect())
+
+    def token(self):
+        key_path, key_id, issuer = self.creds
+        now = int(time.time())
+        header = {"alg": "ES256", "kid": key_id, "typ": "JWT"}
+        payload = {"iss": issuer, "iat": now, "exp": now + 600, "aud": "appstoreconnect-v1"}
+        value = ".".join(b64url(json.dumps(part, separators=(",", ":")).encode()) for part in (header, payload))
+        result = subprocess.run(["openssl", "dgst", "-sha256", "-sign", key_path], input=value.encode(), capture_output=True)
+        require(result.returncode == 0, "OpenSSL could not sign with ASC_KEY_PATH.")
+        return value + "." + b64url(raw_es256_signature(result.stdout))
+
+    def request(self, method, path, body=None, query=None):
+        url = path if path.startswith("https://") else API_ROOT + path
+        parsed = urllib.parse.urlsplit(url)
+        require(parsed.scheme == "https" and parsed.netloc == "api.appstoreconnect.apple.com" and parsed.path.startswith("/v1/"),
+                "Unexpected App Store Connect URL.")
+        if query:
+            url += "?" + urllib.parse.urlencode(query)
+        request = urllib.request.Request(url, method=method,
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"Authorization": "Bearer " + self.token(), "Content-Type": "application/json"})
+        try:
+            with self.opener.open(request, timeout=60) as response:
+                data = response.read()
+                return json.loads(data) if data else {}
+        except urllib.error.HTTPError as error:
+            try:
+                details = "; ".join(item.get("detail", item.get("title", "API error")) for item in json.loads(error.read()).get("errors", []))
+            except (ValueError, AttributeError):
+                details = "See App Store Connect for details."
+            raise ReleaseError("App Store Connect HTTP " + str(error.code) + ": " + details) from None
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise ReleaseError("App Store Connect connection failed; inspect saved progress before retrying: " + str(error)) from None
+
+    def collection(self, path, query=None):
+        result = []
+        while path:
+            page = self.request("GET", path, query=query)
+            result.extend(page["data"])
+            path, query = page.get("links", {}).get("next"), None
+        return result
+
+    def find_build(self, app_id, args, platform):
+        found = self.collection("/v1/builds", {"filter[app]": app_id, "filter[version]": args.build,
+            "filter[preReleaseVersion.version]": args.version, "filter[preReleaseVersion.platform]": PLATFORMS[platform][2]})
+        require(len(found) <= 1, "Multiple builds matched the requested platform/version/build.")
+        return found[0] if found else None
+
+    def wait_for_build(self, app_id, args, platform):
+        deadline = time.monotonic() + args.processing_timeout
+        last_state = None
+        while True:
+            build = self.find_build(app_id, args, platform)
+            state = build["attributes"]["processingState"] if build else "NOT_VISIBLE"
+            if state != last_state:
+                print(platform + " Apple processing: " + state, flush=True)
+                last_state = state
+            require(state not in ("FAILED", "INVALID"), platform + " build failed Apple processing: " + state)
+            if state == "VALID":
+                require(not build["attributes"].get("expired"), "The matching build has expired.")
+                return build
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "Timed out waiting for " + platform + ". Use --resume; do not upload the build again.")
+            time.sleep(min(15, remaining))
+
+
+def preflight_distribution(api, args):
+    apps = api.collection("/v1/apps", {"filter[bundleId]": BUNDLE_ID})
+    require(len(apps) == 1, "The API key must have access to the existing " + BUNDLE_ID + " App Store Connect record.")
+    app_id, groups = apps[0]["id"], []
+    available = api.collection("/v1/apps/" + app_id + "/betaGroups")
+    for name in dict.fromkeys(args.group):
+        found = [group for group in available if group["attributes"]["name"] == name]
+        require(len(found) == 1, "TestFlight group must match exactly one existing group: " + name)
+        require(found[0]["attributes"].get("isInternalGroup") is True,
+                "Only internal TestFlight groups are supported: " + name)
+        groups.append(found[0])
+    if not groups:
+        require(any(group["attributes"].get("isInternalGroup") is True and
+                    group["attributes"].get("hasAccessToAllBuilds") is True for group in available),
+                "Pass --group with an existing internal group, or enable automatic distribution for an internal group in App Store Connect.")
+    return app_id, groups
+
+
+def testflight_readiness_message(state):
+    message = "TestFlight requires attention in App Store Connect: " + state + ". "
+    if state == "MISSING_EXPORT_COMPLIANCE":
+        message += ("Open your app > TestFlight > Builds > the affected platform > this version/build. "
+                    "Click Manage beside Missing Compliance, or open the build's Test Information page and "
+                    "click Provide Export Compliance Information. Complete the encryption questionnaire and save. "
+                    "Updating the local Info.plist does not change an already-uploaded build. ")
+    return message + "After resolving it, use --resume with the same version/build; the uploaded binaries will be reused."
+
+
+def distribute_testflight(api, build_id, groups):
+    require(all(group["attributes"].get("isInternalGroup") is True for group in groups),
+            "Only internal TestFlight groups are supported.")
+    detail = api.request("GET", "/v1/builds/" + build_id + "/buildBetaDetail")["data"]
+    internal_state = detail["attributes"]["internalBuildState"]
+    require(internal_state in ("READY_FOR_BETA_TESTING", "IN_BETA_TESTING"),
+            testflight_readiness_message(internal_state))
+    for group in groups:
+        path = "/v1/betaGroups/" + group["id"] + "/relationships/builds"
+        existing = api.collection(path)
+        if not any(item["id"] == build_id for item in existing):
+            api.request("POST", path, {"data": [{"type": "builds", "id": build_id}]})
+        print("Assigned internal TestFlight group: " + group["attributes"]["name"], flush=True)
+    if not groups:
+        print("Internal TestFlight build ready; the verified automatic internal-group distribution applies.", flush=True)
+
+
+def dry_run(args):
+    creds = ["<ASC_KEY_PATH>", "<ASC_KEY_ID>", "<ASC_ISSUER_ID>"] if args.distribute == "testflight" else ["", "", ""]
+    print("DRY RUN: " + args.version + " (" + args.build + "), " + args.distribute + "; output " + str(args.output_dir))
+    for platform in args.platforms:
+        if not args.skip_tests:
+            print("  Resolve and boot the selected simulator; wait for boot completion (180s maximum).")
+            run(test_command(args, platform), dry_run=True)
+    for platform in args.platforms:
+        run(archive_command(args, platform, creds), dry_run=True)
+        print("  Validate archived B11K bundle/version" + (" and signature" if not args.unsigned else " (unsigned)"))
+    if args.distribute != "archive":
+        print("Export options: " + json.dumps(export_options(args, "export"), sort_keys=True))
+        for platform in args.platforms:
+            run(export_command(args, platform, "export", creds), dry_run=True)
+    if args.distribute == "testflight":
+        print("After archive validation and local export succeed:")
+        for platform in args.platforms:
+            run(export_command(args, platform, "upload", creds), dry_run=True)
+        print("Wait for Apple processing; distribute to internal groups: " + (repr(args.group) if args.group else "existing automatic distribution (verified before building)"))
+
+
+def release(args):
+    if args.dry_run:
+        if args.env_file is not None:
+            credentials(env_file=args.env_file)
+        dry_run(args)
+        return
+    require(sys.platform == "darwin", "Apple archives require macOS and full Xcode.")
+    for tool in ("xcodebuild", "xcrun", "codesign", "openssl"):
+        require(shutil.which(tool), "Missing required tool: " + tool)
+    online = args.distribute == "testflight"
+    creds = credentials(required=online, env_file=args.env_file)
+    if args.resume:
+        require((args.output_dir / "release.json").is_file(), "--resume requires an existing release.json in --output-dir.")
+    else:
+        require(not args.output_dir.exists(), "Output directory already exists. Use --resume or a different --output-dir.")
+        args.output_dir.mkdir(parents=True, mode=0o700)
+    # A persistent lock file plus flock also handles interrupted processes.
+    with (args.output_dir / ".lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ReleaseError("Another release process is using this output directory.") from None
+        execute_release(args, creds, online)
+
+
+def execute_release(args, creds, online):
+    manifest_path = args.output_dir / "release.json"
+    config = {"version": args.version, "build": args.build, "platforms": args.platforms,
+              "team_id": args.team_id, "unsigned": args.unsigned, "bundle_id": BUNDLE_ID,
+              "internal_only": True}
+    if args.resume:
+        manifest = json.loads(manifest_path.read_text())
+        require(manifest.get("config") == config, "Resume parameters do not match the saved release. Use its version, build, platforms, team, and signing mode.")
+    else:
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
+        manifest = {"config": config, "git_commit": commit.stdout.strip(), "platforms": {p: {} for p in args.platforms}}
+
+    def save():
+        pending = manifest_path.with_suffix(".json.tmp")
+        pending.write_text(json.dumps(manifest, indent=2) + "\n")
+        pending.replace(manifest_path)
+
+    manifest["requested_distribution"] = args.distribute
+    manifest.pop("error", None)
+    save()
+    try:
+        require(not manifest.get("source_invalid"), "Source files changed during this release's build. Start a new release directory.")
+
+        def check_build_sources():
+            if manifest["source_fingerprint"] != source_fingerprint():
+                manifest["source_invalid"] = True
+                save()
+                raise ReleaseError("Source files changed during the build. Start a new release directory before uploading.")
+
+        api = AppStoreConnect(creds) if online else None
+        app_id, groups = preflight_distribution(api, args) if online else (None, [])
+        if online:
+            for platform in args.platforms:
+                existing = api.find_build(app_id, args, platform)
+                require(not existing or manifest["platforms"][platform].get("upload_started"),
+                        platform + " version/build already exists in App Store Connect. Use a new build number.")
+        # Once archived and tested, resume reuses those binaries even if the checkout changes.
+        missing = [p for p in args.platforms if not manifest["platforms"][p].get("archived")]
+        needs_tests = not args.skip_tests and any(not manifest["platforms"][p].get("tested") for p in args.platforms)
+        if (missing or needs_tests) and manifest.get("source_fingerprint"):
+            require(manifest["source_fingerprint"] == source_fingerprint(),
+                    "Source files changed since this release began. Restore them before completing its archives/tests, or start a new release directory.")
+        if missing:
+            manifest["source_fingerprint"] = source_fingerprint()
+            save()
+        for platform in args.platforms:
+            state = manifest["platforms"][platform]
+            if not args.skip_tests and not state.get("tested"):
+                run_tests(args, platform)
+                check_build_sources()
+                state["tested"] = True
+                save()
+        for platform in args.platforms:
+            state = manifest["platforms"][platform]
+            if not state.get("archived"):
+                run(archive_command(args, platform, creds), args.output_dir / "logs" / (platform + "-archive.log"))
+                verify_archive(args, platform)
+                check_build_sources()
+                state["archived"] = True
+                save()
+            else:
+                verify_archive(args, platform)
+        if missing:
+            check_build_sources()
+        if args.distribute != "archive":
+            for destination in ("export", "upload"):
+                with (args.output_dir / (destination + "-options.plist")).open("wb") as stream:
+                    plistlib.dump(export_options(args, destination), stream)
+            for platform in args.platforms:
+                state = manifest["platforms"][platform]
+                if not state.get("exported"):
+                    run(export_command(args, platform, "export", creds), args.output_dir / "logs" / (platform + "-export.log"))
+                    state["exported"] = True
+                    save()
+        if online:
+            for platform in args.platforms:
+                state = manifest["platforms"][platform]
+                existing = api.find_build(app_id, args, platform)
+                if existing:
+                    require(state.get("upload_started"), "A build with this platform/version/number already exists. Use a new build number.")
+                elif not state.get("uploaded"):
+                    require(not state.get("upload_started") or args.retry_upload,
+                            "Previous upload outcome is uncertain. Check App Store Connect; use --resume --retry-upload only if Apple did not receive it.")
+                    state["upload_started"] = True
+                    save()
+                    run(export_command(args, platform, "upload", creds), args.output_dir / "logs" / (platform + "-upload.log"))
+                    state["uploaded"] = True
+                    save()
+            # Preserve upload state before waiting for Apple processing.
+            for platform in args.platforms:
+                state = manifest["platforms"][platform]
+                build = api.wait_for_build(app_id, args, platform)
+                state["build_id"] = build["id"]
+                state["uploaded"] = True
+                save()
+            for platform in args.platforms:
+                state = manifest["platforms"][platform]
+                label = platform + " " + args.version + " (" + args.build + ")"
+                print("Checking internal TestFlight distribution for " + label, flush=True)
+                try:
+                    distribute_testflight(api, state["build_id"], groups)
+                except ReleaseError as error:
+                    raise ReleaseError(label + ": " + str(error)) from None
+                state["distribution"] = args.distribute
+                save()
+        manifest["status"] = "complete"
+        save()
+        print("Release finished: " + str(args.output_dir), flush=True)
+    except (Exception, KeyboardInterrupt) as error:
+        manifest["status"] = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
+        manifest["error"] = str(error)
+        save()
+        raise
+
+
+def main(argv=None):
+    try:
+        release(parse_args(argv))
+        return 0
+    except KeyboardInterrupt:
+        print("Release interrupted. Progress is saved; use --resume.", file=sys.stderr)
+        return 130
+    except (ReleaseError, OSError, ValueError, plistlib.InvalidFileException) as error:
+        print("Release failed: " + str(error), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

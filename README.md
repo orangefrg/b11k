@@ -113,6 +113,26 @@ For publishing details, see:
 - `iosApp/B11k/IOS_DISTRIBUTION.md`
 - `DEPLOYMENT_SECURITY.md`
 
+Build and publish an internal TestFlight release with the same command interface
+as Skupobrate (choose an unused build number):
+
+```bash
+./scripts/release-apple --version 1.0 --build 3 --distribute testflight \
+  --env-file secrets/apple-release.env --signing-auth xcode
+```
+
+This runs the iOS unit suite, archives, exports, uploads, and waits for Apple
+processing. Configure automatic distribution to an internal group in App Store
+Connect, or add `--group "Your internal group"`. Add `--dry-run` to preview;
+add `--resume` to continue an interrupted release. See the
+[release setup and options](iosApp/B11k/IOS_DISTRIBUTION.md#command-line-internal-testflight).
+
+Before tests, the script resolves the selected simulator and waits for startup to
+finish. If the runner encounters the simulator's Busy/preflight launch failure
+before tests start, it restarts that simulator and retries once. Test failures
+still stop the release. Simulator startup details are in `logs/ios-simulator.log`
+inside the release output directory.
+
 ## Web UI
 
 Main pages:

@@ -3,6 +3,128 @@
 This file describes how to move the iOS app from personal development to
 TestFlight and then App Store distribution.
 
+## Command-line Internal TestFlight
+
+From the repository root, use the same interface as Skupobrate:
+
+```bash
+./scripts/release-apple --version 1.0 --build 3 --distribute testflight \
+  --env-file secrets/apple-release.env --signing-auth xcode
+```
+
+`1.0 (3)` is an example; choose an unused build number. The script runs
+`B11kTests` on the iPhone 17 Pro simulator, creates and validates a Release
+archive, exports an IPA, uploads it, waits for Apple processing, and verifies
+internal TestFlight readiness. Version/build settings are overridden for that
+run; the saved Xcode project is not changed. Xcode's automatic build-number
+management is disabled.
+
+All exports set `testFlightInternalTestingOnly=true`. These builds cannot be
+used for external testing or App Store submission. The script accepts only
+existing internal groups and does not create groups or invite testers. See
+[Apple's internal testing guide](https://developer.apple.com/help/app-store-connect/test-a-beta-version/add-internal-testers).
+
+### One-time setup
+
+1. Use macOS with full Xcode selected, Python 3.9+, OpenSSL, and an installed
+   iOS simulator compatible with the app's deployment target. No Fastlane or
+   third-party Python packages are needed.
+2. Configure paid-team signing and an App Store Connect app record for
+   `com.apetrikov.b11k`. The script defaults to the team in the Xcode project
+   (currently `H77N8JK4W4`, the team that owns `com.apetrikov.b11k`). Override it using `--team-id TEAM_ID` or
+   `APPLE_TEAM_ID` if the app belongs to another team. Reusing a Skupobrate API
+   key does not change B11K's signing team.
+3. Create an internal testing group in App Store Connect. Enable automatic
+   distribution, or pass its exact name with `--group "Internal Testers"`.
+   Repeat `--group` for multiple internal groups. The script checks this before
+   building so a successful upload has a distribution destination.
+4. Supply an App Store Connect **team API key** with access to B11K and beta
+   distribution permissions. Individual API keys are not supported. Create
+   the local credential file:
+
+   ```bash
+   mkdir -p secrets
+   cp scripts/apple-release.env.example secrets/apple-release.env
+   ```
+
+   Edit it to contain:
+
+   ```dotenv
+   ASC_KEY_PATH="./AuthKey_YOUR_KEY_ID.p8"
+   ASC_KEY_ID="YOUR_KEY_ID"
+   ASC_ISSUER_ID="YOUR_ISSUER_ID"
+   ```
+
+   Put the `.p8` next to that file, or use an absolute key path. The script
+   reads assignments literally: it never executes shell expressions. All
+   three values must come from the selected file. Without `--env-file`, it
+   reads those three environment variables instead. `secrets/`, key files,
+   and release artifacts are Git-ignored.
+
+An existing credential file can be reused if its key has access to this app:
+
+```bash
+./scripts/release-apple --version 1.0 --build 3 --distribute testflight \
+  --env-file ../skupobrate/secrets/apple-release.env --signing-auth xcode
+```
+
+`--signing-auth xcode` uses the account in Xcode Settings → Accounts for
+signing/upload, while the API key checks processing and assigns groups. The
+default `--signing-auth api-key` also supplies that key to Xcode. Automatic
+provisioning is enabled for signed operations; disable it with
+`--no-provisioning-updates` only when signing material is already installed.
+Local archive/export modes can use an existing Xcode account without API keys.
+
+### Preview, artifacts, and retries
+
+```bash
+# Preview without building or contacting Apple; no credentials required.
+./scripts/release-apple --version 1.0 --build 3 --distribute testflight --dry-run
+
+# Local unsigned archive and unit tests; no upload or provisioning.
+./scripts/release-apple --version 1.0 --build 3 --unsigned \
+  --output-dir /tmp/b11k-release-check
+
+# Continue a signed release using its original version/build and artifacts.
+./scripts/release-apple --version 1.0 --build 3 --distribute testflight \
+  --env-file secrets/apple-release.env --signing-auth xcode --resume
+```
+
+Artifacts default to `dist/apple/VERSION-BUILD/`: `ios.xcarchive`, exported
+IPA, per-step `logs/`, DerivedData, and `release.json` recording progress.
+Use `--output-dir PATH` to change this. Paths are relative to the caller's
+working directory; relative key paths are relative to the credential file.
+An explicitly selected credential file is validated even during a dry run.
+Credential arguments are redacted from the console; treat Xcode logs as private.
+
+Use `--distribute archive` (the default) for a local archive, or `--distribute
+export` for an archive and local IPA. A signed archive/export can be uploaded
+later with `--resume --distribute testflight`. An unsigned archive cannot be
+promoted to a signed release. Keep the same version, build, team, and output
+directory on resume, and repeat your credential/signing/group options.
+
+Completed steps are reused. Source changes block resuming incomplete builds;
+completed archives can be reused even after the checkout changes. After an
+uncertain upload, resume first looks for the existing build at Apple. It does
+not automatically resend it. Only after confirming Apple did not receive it,
+use `--resume --retry-upload`. A processing timeout or missing export-compliance
+answer preserves the upload; resolve it in App Store Connect and resume.
+
+Other options: `--ios-test-destination 'platform=iOS Simulator,id=UUID'`
+(or `IOS_TEST_DESTINATION`), `--skip-tests`, and `--processing-timeout 2400`
+(default 1200 seconds). Run `--help` for all options.
+
+The current app unit suite is a starter test; passing it is not functional beta
+qualification. Test login, sync, maps, and segments on a real device separately.
+CloudKit and segment import/export are not implemented or required for this
+backend-backed internal build.
+
+Run the release utility's offline regression tests with:
+
+```bash
+python3 -B -m unittest discover -s scripts/tests -v
+```
+
 ## Phase 1: Personal Device Development
 
 Goal: run the app on your own iPhone while the backend and app are still moving.
@@ -51,16 +173,16 @@ Steps:
 
 1. Sign in to Xcode with the paid developer account.
 2. Select the paid Team in Signing & Capabilities.
-3. Enable iCloud and CloudKit for the app target.
-4. Create or select the CloudKit container.
+3. Keep iCloud/CloudKit disabled for the current backend-backed app.
+4. Configure a CloudKit container only if a future build implements that sync.
 5. Enable associated domains if using universal links.
 6. Add URL scheme support if using custom-scheme Strava callback.
 7. Create the app record in App Store Connect.
 8. Archive in Xcode.
 9. Upload the archive to App Store Connect.
 10. Add internal testers in TestFlight.
-11. Test login, CloudKit sync, import/export, segment creation, and API access
-    on at least two devices signed into the same iCloud account.
+11. Test login, activity sync, maps, segment creation, and API access on at
+    least two devices. Add CloudKit and import/export checks when implemented.
 
 Backend changes before TestFlight:
 
@@ -70,7 +192,7 @@ Backend changes before TestFlight:
 - Secure cookies enabled for web auth.
 - Cross-user tests passing.
 
-CloudKit steps before external testers:
+For a future CloudKit-enabled build, before external testers:
 
 - Confirm records sync in the development CloudKit environment.
 - Promote CloudKit schema to production.
